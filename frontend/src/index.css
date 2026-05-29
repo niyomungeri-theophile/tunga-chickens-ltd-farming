@@ -1,5 +1,5 @@
 /* Global CSS loaded by index.html (keep minimal and app-specific) */
-
+@import "tailwindcss";
 :root {
   /* Light mode */
   --app-bg: #f8fafc;
