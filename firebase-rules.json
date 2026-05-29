@@ -1,0 +1,18 @@
+{
+  "_note": "This project now uses MySQL instead of Firebase",
+  "_migration_info": {
+    "database": "MySQL",
+    "backend": "Node.js + Express",
+    "authentication": "JWT (JSON Web Tokens)",
+    "setup": "See backend/README.md for setup instructions"
+  },
+  "_old_firebase_rules_archived": {
+    "description": "These were the original Firebase Realtime Database rules. Now authentication and authorization are handled by the Express backend with JWT middleware.",
+    "users": "Authenticated users can read; admin can write",
+    "sensors": "Authenticated users can read; admin can write",  
+    "power": "Authenticated users can read; admin can write",
+    "status": "Authenticated users can read; admin can write",
+    "transactions": "Admin/supervisor can read and write",
+    "incubators": "Authenticated users can read; admin can write"
+  }
+}

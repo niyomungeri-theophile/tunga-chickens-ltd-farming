@@ -1,0 +1,1 @@
+Preparing to patch setup to call EEPROM.begin and loadDeviceCredentialsFromEEPROM before connectToWiFi.

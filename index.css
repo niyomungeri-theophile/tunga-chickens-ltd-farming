@@ -1,0 +1,246 @@
+/* Global CSS loaded by index.html (keep minimal and app-specific) */
+
+:root {
+  /* Light mode */
+  --app-bg: #f8fafc;
+  --app-surface: #ffffff;
+  --app-surface-2: #f1f5f9;
+  --app-surface-3: #e2e8f0;
+  --app-border: #e2e8f0;
+  --app-text: #0f172a;
+  --app-muted: #64748b;
+  --app-accent: #15803d;
+  --app-accent-strong: #166534;
+  --app-accent-muted: rgba(21, 128, 61, 0.7);
+  --app-accent-soft: rgba(21, 128, 61, 0.12);
+  --app-accent-soft-2: rgba(21, 128, 61, 0.06);
+  --app-accent-soft-3: rgba(21, 128, 61, 0.18);
+  --app-accent-contrast: #f8fafc;
+  --app-accent-border: rgba(21, 128, 61, 0.35);
+  
+  /* Legacy neon colors for dark mode reference */
+  --neon-primary: #39ff14;
+  --neon-dark: #1a7a1a;
+  --neon-bg: #020c02;
+  --neon-bg-alt: #0a1f0a;
+  --neon-bg-darker: #010601;
+  
+  /* Semantic colors */
+  --color-success: #22c55e;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+  --color-info: #3b82f6;
+  --color-secondary: #6366f1;
+}
+
+.dark {
+  --app-bg: #0b0f13;
+  --app-surface: #0f172a;
+  --app-surface-2: #0b1320;
+  --app-surface-3: #101726;
+  --app-border: #1f2937;
+  --app-text: #e2e8f0;
+  --app-muted: #94a3b8;
+  --app-accent: #39ff14;
+  --app-accent-strong: #22c55e;
+  --app-accent-muted: rgba(57, 255, 20, 0.7);
+  --app-accent-soft: rgba(57, 255, 20, 0.12);
+  --app-accent-soft-2: rgba(57, 255, 20, 0.06);
+  --app-accent-soft-3: rgba(57, 255, 20, 0.2);
+  --app-accent-contrast: #020c02;
+  --app-accent-border: rgba(57, 255, 20, 0.3);
+  
+  /* Legacy neon colors */
+  --neon-primary: #39ff14;
+  --neon-dark: #1a7a1a;
+  --neon-bg: #020c02;
+  --neon-bg-alt: #0a1f0a;
+  --neon-bg-darker: #010601;
+  
+  /* Semantic colors */
+  --color-success: #22c55e;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+  --color-info: #3b82f6;
+  --color-secondary: #6366f1;
+}
+
+body {
+  background-color: var(--app-bg) !important;
+  color: var(--app-text) !important;
+}
+
+.theme-card {
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.theme-muted {
+  color: var(--app-muted);
+}
+
+.theme-accent {
+  color: var(--app-accent);
+}
+
+/* Utility classes using CSS variables */
+.text-neon {
+  color: var(--neon-primary) !important;
+}
+
+.text-neon-dark {
+  color: var(--neon-dark) !important;
+}
+
+.bg-neon-subtle {
+  background-color: var(--neon-primary) !important;
+  opacity: 0.1;
+}
+
+.bg-neon-bg {
+  background-color: var(--neon-bg) !important;
+}
+
+.bg-neon-bg-alt {
+  background-color: var(--neon-bg-alt) !important;
+}
+
+.border-neon {
+  border-color: var(--neon-primary) !important;
+}
+
+.border-neon-subtle {
+  border-color: var(--neon-primary) !important;
+  border-opacity: 0.2;
+}
+
+/* Legacy color overrides for light mode */
+html:not(.dark) .text-\[\#39ff14\] {
+  color: var(--app-accent) !important;
+}
+
+html:not(.dark) .text-\[\#39ff14\/70\] {
+  color: var(--app-accent-muted) !important;
+}
+
+html:not(.dark) .text-\[\#1a7a1a\] {
+  color: var(--app-muted) !important;
+}
+
+html:not(.dark) .text-\[\#020c02\] {
+  color: var(--app-text) !important;
+}
+
+html:not(.dark) .bg-\[\#0b0f13\] {
+  background-color: var(--app-bg) !important;
+}
+
+html:not(.dark) .bg-\[\#020c02\],
+html:not(.dark) .bg-\[\#0a1f0a\],
+html:not(.dark) .bg-\[\#101f10\],
+html:not(.dark) .bg-\[\#010601\] {
+  background-color: var(--app-surface) !important;
+}
+
+html:not(.dark) .bg-\[\#39ff14\] {
+  background-color: var(--app-accent) !important;
+  color: var(--app-accent-contrast) !important;
+}
+
+html:not(.dark) .bg-\[\#39ff14\/5\],
+html:not(.dark) .bg-\[\#39ff14\/10\],
+html:not(.dark) .bg-\[\#39ff14\/15\],
+html:not(.dark) .bg-\[\#39ff14\/20\],
+html:not(.dark) .bg-\[\#39ff14\/25\] {
+  background-color: var(--app-accent-soft) !important;
+}
+
+html:not(.dark) .border-\[\#39ff14\],
+html:not(.dark) .border-\[\#39ff14\/30\],
+html:not(.dark) .border-\[\#39ff14\/25\],
+html:not(.dark) .border-\[\#39ff14\/20\],
+html:not(.dark) .border-\[\#39ff14\/15\],
+html:not(.dark) .border-\[\#39ff14\/10\] {
+  border-color: var(--app-accent-border) !important;
+}
+
+html:not(.dark) .hover\:bg-\[\#39ff14\/10\]:hover,
+html:not(.dark) .hover\:bg-\[\#39ff14\/15\]:hover {
+  background-color: var(--app-accent-soft) !important;
+}
+
+html:not(.dark) .hover\:text-\[\#39ff14\]:hover {
+  color: var(--app-accent-strong) !important;
+}
+
+html:not(.dark) .placeholder\:text-\[\#1a7a1a\]::placeholder {
+  color: var(--app-muted) !important;
+}
+
+/* Fade-in animation used by the app */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease both;
+}
+
+/* Footer/hero marquee animation used on the landing page */
+@keyframes marqueeLeft {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+/* Print contract agreement cleanly (hide overlay/actions; remove shadows) */
+@media print {
+  .contract-print-overlay {
+    position: static !important;
+    inset: auto !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+  }
+
+  .contract-print-card {
+    max-width: none !important;
+    width: 100% !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+
+  .contract-print-close,
+  .contract-print-actions {
+    display: none !important;
+  }
+
+  .contract-print-sheet {
+    border: none !important;
+    border-radius: 0 !important;
+  }
+
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+
+/* (no global dark-mode color overrides) */

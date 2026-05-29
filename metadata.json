@@ -1,0 +1,7 @@
+{
+  "name": "Eco-Smart Poultry Care System",
+  "description": "A high-performance Vanilla JS IoT platform for professional hatchery management.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

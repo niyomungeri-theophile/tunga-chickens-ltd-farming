@@ -1,0 +1,39 @@
+{
+  "database": "MySQL",
+  "description": "Eco-Smart Poultry Care System Database Schema",
+  "tables": {
+    "users": {
+      "description": "System users and authentication",
+      "columns": ["id (UUID)", "full_name", "email", "password (hashed)", "role", "photo_url", "created_at"]
+    },
+    "sensors": {
+      "description": "Temperature and humidity readings",
+      "columns": ["id", "temperature", "humidity", "light_lux", "co2", "nh3", "ch4", "o2", "h2s", "recorded_at"]
+    },
+    "gas_readings": {
+      "description": "Gas sensor readings",
+      "columns": ["id", "co2", "nh3", "ch4", "o2", "h2s", "recorded_at"]
+    },
+    "power": {
+      "description": "Power and energy monitoring",
+      "columns": ["id", "user_id", "source", "voltage", "current", "cost_rwf", "total_energy_kwh", "consumed_kwh", "cost_usd", "battery_level", "recorded_at"]
+    },
+    "device_status": {
+      "description": "Control device states",
+      "columns": ["id", "heater", "fan", "rotator", "updated_at"]
+    },
+    "transactions": {
+      "description": "Financial transactions",
+      "columns": ["id (UUID)", "date", "timestamp", "type", "category", "amount", "user_id", "created_at"]
+    },
+    "incubators": {
+      "description": "Incubator device registry",
+      "columns": ["id (UUID)", "physical_id", "description", "location", "capacity", "status", "created_at"]
+    }
+  },
+  "sample_data": {
+    "sensors": { "temperature": 37.8, "humidity": 60.5 },
+    "power": { "source": "SOLAR", "voltage": 13.2, "current": 1.8, "cost_rwf": 0, "battery_level": 95 },
+    "status": { "heater": "OFF", "fan": "ON", "rotator": "AUTO" }
+  }
+}

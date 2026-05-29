@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register | Eco-Smart Poultry Care</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script type="importmap">
+{
+  "imports": {
+    "firebase/app": "https://esm.sh/firebase@11.0.1/app",
+    "firebase/auth": "https://esm.sh/firebase@11.0.1/auth",
+    "firebase/database": "https://esm.sh/firebase@11.0.1/database"
+  }
+}
+</script>
+    <style>
+        body { font-family: 'Poppins', sans-serif; }
+        .photo-container {
+            position: relative;
+            width: 130px;
+            height: 130px;
+            margin: 0 auto 2rem;
+        }
+        .preview-img {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 4px solid #fff;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+            background: #f1f5f9;
+        }
+        .upload-btn {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            background: #10b981;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            border: 3px solid white;
+            transition: transform 0.2s;
+        }
+        .upload-btn:hover { transform: scale(1.1); }
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-slate-50 flex items-center justify-center min-h-screen p-6">
+    <div class="w-full max-w-lg bg-white rounded-[2.5rem] shadow-2xl p-10 border border-slate-100 animate-fade-in">
+        <div class="text-center mb-8">
+            <h2 class="text-3xl font-black text-slate-900 mb-1 tracking-tight">Create Account</h2>
+            <p class="text-slate-500 text-sm">Join the Eco-Smart Poultry system</p>
+        </div>
+
+        <form id="regForm" class="space-y-5">
+            <div class="photo-container">
+                <img id="previewImg" src="https://ui-avatars.com/api/?name=User&background=f1f5f9&color=cbd5e1" class="preview-img">
+                <label for="photoInput" class="upload-btn">
+                    <i data-lucide="camera" class="w-5 h-5"></i>
+                </label>
+                <input type="file" id="photoInput" accept="image/*" class="hidden">
+            </div>
+
+            <div class="grid grid-cols-1 gap-5">
+                <input type="text" id="fullName" required placeholder="Full Name" 
+                       class="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 outline-none focus:border-emerald-500 transition-all font-medium">
+                
+                <input type="email" id="email" required placeholder="Email Address" 
+                       class="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 outline-none focus:border-emerald-500 transition-all font-medium">
+
+                <select id="role" class="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 outline-none focus:border-emerald-500 transition-all font-medium appearance-none">
+                    <option value="farmer">Farmer</option>
+                    <option value="supervisor">Supervisor</option>
+                    <option value="admin">Administrator</option>
+                </select>
+
+                <input type="password" id="password" required placeholder="Password (min. 6 chars)" 
+                       class="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 outline-none focus:border-emerald-500 transition-all font-medium">
+            </div>
+
+            <button type="submit" id="regBtn" class="w-full bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl hover:bg-emerald-700 transition-all active:scale-[0.98] mt-4">
+                Complete Registration
+            </button>
+            
+            <p class="text-center text-sm text-slate-500 mt-4">
+                Already registered? <a href="login.html" class="text-emerald-600 font-bold hover:underline">Sign In</a>
+            </p>
+        </form>
+    </div>
+
+    <script type="module">
+        import { registerUser } from "./auth.js";
+        lucide.createIcons();
+
+        let base64Photo = null;
+
+        document.getElementById('photoInput').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    document.getElementById('previewImg').src = event.target.result;
+                    base64Photo = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        document.getElementById('regForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const fullName = document.getElementById('fullName').value;
+            const role = document.getElementById('role').value;
+            const btn = document.getElementById('regBtn');
+
+            btn.disabled = true;
+            btn.textContent = 'Processing...';
+
+            const result = await registerUser(email, password, fullName, role, base64Photo);
+
+            if (result.success) {
+                Swal.fire({ 
+                    icon: 'success', 
+                    title: 'Account Created', 
+                    text: 'Konti yafunguwe neza. Injira ubu.',
+                    confirmButtonColor: '#10b981'
+                }).then(() => {
+                    window.location.href = "login.html";
+                });
+            } else {
+                btn.disabled = false;
+                btn.textContent = 'Complete Registration';
+                Swal.fire('Error', result.message, 'error');
+            }
+        });
+    </script>
+<!--Start of Tawk.to Script-->
+<script type="text/javascript">
+var Tawk_API=Tawk_API||{}, Tawk_LoadStart=new Date();
+(function(){
+var s1=document.createElement("script"),s0=document.getElementsByTagName("script")[0];
+s1.async=true;
+s1.src='https://embed.tawk.to/6a0ad547ab38741c31f9833a/1jot5280k';
+s1.charset='UTF-8';
+s1.setAttribute('crossorigin','*');
+s0.parentNode.insertBefore(s1,s0);
+})();
+</script>
+<!--End of Tawk.to Script-->
+</body>
+</html>
