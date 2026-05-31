@@ -14,7 +14,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/, /^http:\/\/192\.168\.110\.7:\d+$/],
+    origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/, /^http:\/\/192\.168\.110\.7:\d+$/, 'https://tunga-chickens-ltd-farming.vercel.app'],
     credentials: true
   }
 });
@@ -25,6 +25,7 @@ const allowedOrigins = [
   /^http:\/\/localhost:\d+$/,
   /^http:\/\/127\.0\.0\.1:\d+$/,
   /^http:\/\/192\.168\.110\.7:\d+$/,
+  'https://tunga-chickens-ltd-farming.vercel.app',
 ];
 
 // Middleware
