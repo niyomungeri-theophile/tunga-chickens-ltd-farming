@@ -35,16 +35,16 @@ let productsSchemaReady = false;
 async function ensureProductsSchema() {
   if (productsSchemaReady) return;
   try {
-    await db.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS reposted_until TIMESTAMP NULL");
+    await db.execute("ALTER TABLE products ADD COLUMN reposted_until TIMESTAMP NULL");
   } catch (err) {
-    if (err && err.code !== '42701') {
+    if (err && err.code !== 'ER_DUP_FIELDNAME' && err.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
       // ignore duplicate column errors, rethrow others
     }
   }
-   try {
-    await db.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS repost_count INT NOT NULL DEFAULT 0");
+  try {
+    await db.execute("ALTER TABLE products ADD COLUMN repost_count INT NOT NULL DEFAULT 0");
   } catch (err) {
-    if (err && err.code !== '42701') {
+    if (err && err.code !== 'ER_DUP_FIELDNAME' && err.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
     }
   }
   productsSchemaReady = true;
@@ -64,105 +64,69 @@ async function processProductReposts() {
   try {
     await ensureProductsSchema();
 
-    // Auto-repost products older than 3 days
-    const { rows: toRepost } = await db.query(`
-      SELECT id, product_id, uploaded_by
-      FROM products
-      WHERE COALESCE(updated_at, uploaded_at) <= NOW() - INTERVAL '3 days'
-      AND reposted_until IS NULL
-    `);
-
+    // Auto-repost products older than 3 days that haven't been reposted yet
+    const [toRepost] = await db.query("SELECT id, product_id, uploaded_by FROM products WHERE (COALESCE(updated_at, created_at) <= DATE_SUB(NOW(), INTERVAL 3 DAY)) AND reposted_until IS NULL");
     for (const p of toRepost) {
       try {
-        await db.query(`
-          UPDATE products
-          SET reposted_until = NOW() + INTERVAL '5 days',
-              repost_count = COALESCE(repost_count, 0) + 1,
-              updated_at = NOW()
-          WHERE id = $1
-        `, [p.id]);
-
-        // Email notification (unchanged)
+        const [res] = await db.execute(
+          "UPDATE products SET reposted_until = DATE_ADD(NOW(), INTERVAL 5 DAY), repost_count = COALESCE(repost_count,0) + 1, updated_at = NOW() WHERE id = ?",
+          [p.id]
+        );
+        // optional: notify owner via email if SMTP configured
         try {
           const transporter = getEmailTransporter();
           if (transporter) {
-            const { rows: urows } = await db.query(
-              'SELECT full_name, email FROM users WHERE id = $1 LIMIT 1',
-              [p.uploaded_by]
-            );
-
+            const [urows] = await db.execute('SELECT full_name, email FROM users WHERE id = ? LIMIT 1', [p.uploaded_by]);
             const user = urows?.[0];
-
             if (user?.email) {
               await transporter.sendMail({
                 from: process.env.SMTP_FROM || process.env.SMTP_USER,
                 to: user.email,
                 subject: 'Your product was auto-reposted on Eco-Smart',
-                text: `Hello ${user.full_name || ''},
-
-Your product listing has been automatically reposted for 5 more days to keep it visible on the marketplace.
-
-Regards, Eco-Smart Team`
+                text: `Hello ${user.full_name || ''},\n\nYour product listing has been automatically reposted for 5 more days to keep it visible on the marketplace.\n\nRegards, Eco-Smart Team`
               });
             }
           }
         } catch (mailErr) {
           console.error('Auto-repost mail error:', mailErr.message || mailErr);
         }
-
       } catch (err) {
         console.error('Auto-repost update error for product', p.id, err.message || err);
       }
     }
 
-    // Auto-delete expired reposts
-    const { rows: toDelete } = await db.query(`
-      SELECT id, product_id, uploaded_by
-      FROM products
-      WHERE reposted_until IS NOT NULL
-      AND reposted_until < NOW()
-    `);
-
+    // Auto-delete products whose reposted_until expired
+    const [toDelete] = await db.query("SELECT id, product_id, uploaded_by FROM products WHERE reposted_until IS NOT NULL AND reposted_until < NOW()");
     for (const p of toDelete) {
       try {
-        await db.query('DELETE FROM products WHERE id = $1', [p.id]);
-
+        await db.execute('DELETE FROM products WHERE id = ?', [p.id]);
+        // optional: notify owner about deletion
         try {
           const transporter = getEmailTransporter();
           if (transporter) {
-            const { rows: urows } = await db.query(
-              'SELECT full_name, email FROM users WHERE id = $1 LIMIT 1',
-              [p.uploaded_by]
-            );
-
+            const [urows] = await db.execute('SELECT full_name, email FROM users WHERE id = ? LIMIT 1', [p.uploaded_by]);
             const user = urows?.[0];
-
             if (user?.email) {
               await transporter.sendMail({
                 from: process.env.SMTP_FROM || process.env.SMTP_USER,
                 to: user.email,
                 subject: 'Your product was removed from Eco-Smart',
-                text: `Hello ${user.full_name || ''},
-
-Your product listing has been removed as its repost period expired. You may repost it from the marketplace.
-
-Regards, Eco-Smart Team`
+                text: `Hello ${user.full_name || ''},\n\nYour product listing has been removed as its repost period expired. You may repost it from the marketplace.\n\nRegards, Eco-Smart Team`
               });
             }
           }
         } catch (mailErr) {
           console.error('Auto-delete mail error:', mailErr.message || mailErr);
         }
-
       } catch (err) {
         console.error('Auto-delete error for product', p.id, err.message || err);
       }
     }
-
   } catch (err) {
     console.error('processProductReposts error:', err.message || err);
   }
 }
+
 // Run the repost/delete job every hour
 setInterval(processProductReposts, 60 * 60 * 1000);
 // Also run once at startup
@@ -194,7 +158,9 @@ router.post('/', authMiddleware, upload.single('media'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Image or video is required' });
     }
 
-    const { rows: users } = await db.query('SELECT full_name, email, contact FROM users WHERE id = $1 LIMIT 1', [requesterId]
+    const [users] = await db.execute(
+      'SELECT full_name, email, contact FROM users WHERE id = ? LIMIT 1',
+      [requesterId]
     );
 
     const profile = users[0] || {};
@@ -208,7 +174,8 @@ router.post('/', authMiddleware, upload.single('media'), async (req, res) => {
     const mediaUrl = `/uploads/${mediaFolder}/${req.file.filename}`;
     const mediaType = isVideo ? 'video' : 'image';
 
-    const { rows: result } = await db.query(`INSERT INTO products (
+    const [result] = await db.execute(
+      `INSERT INTO products (
         product_id,
         product_name,
         media_type,
@@ -220,7 +187,8 @@ router.post('/', authMiddleware, upload.single('media'), async (req, res) => {
         seller_name,
         contact,
         uploaded_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,[
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
         productId,
         product_name,
         mediaType,
@@ -235,7 +203,7 @@ router.post('/', authMiddleware, upload.single('media'), async (req, res) => {
       ]
     );
 
-   res.status(201).json({ success: true, id: result[0]?.id, product_id: productId });
+    res.status(201).json({ success: true, id: result.insertId, product_id: productId });
   } catch (err) {
     console.error(err);
     const message = err && err.message ? `Database error: ${err.message}` : 'Database error';
@@ -251,7 +219,7 @@ router.post('/', authMiddleware, upload.single('media'), async (req, res) => {
 // Get all products
 router.get('/', async (req, res) => {
   try {
-    const { rows: rows } = await db.query(`
+    const [rows] = await db.query(`
       SELECT
         p.*,
         p.media_url AS image_url,
@@ -272,12 +240,15 @@ router.get('/', async (req, res) => {
 // Publish/unpublish a product
 router.patch('/:id/publish', authMiddleware, async (req, res) => {
   try {
-   if (!isAdminLike(req.user?.role)) {
+    if (!isAdminLike(req.user?.role)) {
       return res.status(403).json({ success: false, message: 'Not authorized to publish products' });
     }
     const { published } = req.body;
-    const result = await db.query('UPDATE products SET published = $1 WHERE id = $2', [published, req.params.id]);
-    res.json({ success: true, affectedRows: result.rowCount });
+    const [result] = await db.execute(
+      'UPDATE products SET published = ? WHERE id = ?',
+      [published, req.params.id]
+    );
+    res.json({ success: true, affectedRows: result.affectedRows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Database error' });
@@ -308,7 +279,7 @@ router.put('/:id', authMiddleware, upload.single('media'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing required fields: product_name, description, location, and price' });
     }
 
-    const { rows: rows } = await db.query('SELECT uploaded_by FROM products WHERE id = $1', [req.params.id]);
+    const [rows] = await db.execute('SELECT uploaded_by FROM products WHERE id = ?', [req.params.id]);
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
@@ -328,17 +299,19 @@ router.put('/:id', authMiddleware, upload.single('media'), async (req, res) => {
 
     const normalizedSellerName = String(seller_name || '').trim();
     const normalizedContact = String(contact || '').trim();
-    const { rows: result } = await db.query(`UPDATE products
-       SET product_name = $1,
-           description = $2,
-           address = $3,
-           location = $4,
-           price = $5,
-           seller_name = COALESCE(NULLIF($6, ''), seller_name),
-           contact = COALESCE(NULLIF($7, ''), contact),
-             media_url = COALESCE($8, media_url),
-             media_type = CASE WHEN $9 IS NULL THEN media_type ELSE $10 END
-       WHERE id = $11`, [
+    const [result] = await db.execute(
+      `UPDATE products
+       SET product_name = ?,
+           description = ?,
+           address = ?,
+           location = ?,
+           price = ?,
+           seller_name = COALESCE(NULLIF(?, ''), seller_name),
+           contact = COALESCE(NULLIF(?, ''), contact),
+             media_url = COALESCE(?, media_url),
+             media_type = CASE WHEN ? IS NULL THEN media_type ELSE ? END
+       WHERE id = ?`,
+      [
         product_name,
         description || null,
         address || null,
@@ -353,7 +326,7 @@ router.put('/:id', authMiddleware, upload.single('media'), async (req, res) => {
       ]
     );
 
-    res.json({ success: true, affectedRows: result.rowCount });
+    res.json({ success: true, affectedRows: result.affectedRows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Database error' });
@@ -369,7 +342,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     }
     const adminLike = isAdminLike(req.user?.role);
     // Check ownership
-    const { rows: rows } = await db.query('SELECT uploaded_by FROM products WHERE id = $1', [req.params.id]);
+    const [rows] = await db.execute('SELECT uploaded_by FROM products WHERE id = ?', [req.params.id]);
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
@@ -381,8 +354,8 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized to delete this product' });
     }
     // Delete product
-    const result = await db.query('DELETE FROM products WHERE id = $1', [req.params.id]); 
-   res.json({ success: true, affectedRows: result.rowCount });
+    const [result] = await db.execute('DELETE FROM products WHERE id = ?', [req.params.id]);
+    res.json({ success: true, affectedRows: result.affectedRows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Database error' });

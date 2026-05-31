@@ -9,29 +9,35 @@ let usersStatusSchemaReady = false;
 
 async function ensureUsersStatusSchema() {
   if (usersStatusSchemaReady) return;
+  try {
+    await pool.query("ALTER TABLE users ADD COLUMN status ENUM('active','inactive') NOT NULL DEFAULT 'active'");
+  } catch (error) {
+    if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+  }
 
-  // ✅ Fix 1: PostgreSQL-compatible ALTER statements with IF NOT EXISTS
   const profileAlterStatements = [
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'",
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS contact VARCHAR(100) NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_size VARCHAR(100) NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_location VARCHAR(255) NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS device_serial_number VARCHAR(100) NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS can_sell SMALLINT NOT NULL DEFAULT 0',  // Changed from TINYINT to SMALLINT
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp VARCHAR(20) NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp_expires_at TIMESTAMP NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_paid_until TIMESTAMP NULL',
+    'ALTER TABLE users ADD COLUMN contact VARCHAR(100) NULL',
+    'ALTER TABLE users ADD COLUMN farm_size VARCHAR(100) NULL',
+    'ALTER TABLE users ADD COLUMN farm_location VARCHAR(255) NULL',
+    'ALTER TABLE users ADD COLUMN device_serial_number VARCHAR(100) NULL',
+    'ALTER TABLE users ADD COLUMN can_sell TINYINT(1) NOT NULL DEFAULT 0',
+    'ALTER TABLE users ADD COLUMN seller_otp VARCHAR(20) NULL',
+    'ALTER TABLE users ADD COLUMN seller_otp_expires_at TIMESTAMP NULL',
+    'ALTER TABLE users ADD COLUMN seller_paid_until TIMESTAMP NULL'
   ];
 
   for (const statement of profileAlterStatements) {
-    try { await pool.query(statement); } catch (e) { /* ignore */ }
+    try {
+      await pool.query(statement);
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
   }
 
-  // ✅ Fix 1: PostgreSQL-compatible DATE_ADD replacement
   await pool.query(`
     UPDATE users
-    SET seller_otp_expires_at = created_at + INTERVAL '30 days',
-        seller_paid_until = created_at + INTERVAL '30 days'
+    SET seller_otp_expires_at = DATE_ADD(created_at, INTERVAL 30 DAY),
+        seller_paid_until = DATE_ADD(created_at, INTERVAL 30 DAY)
     WHERE role = 'customer'
       AND can_sell = 1
       AND seller_otp_expires_at IS NULL
@@ -147,14 +153,13 @@ function formatDeviceSerialNumber(sequence) {
 }
 
 async function generateNextDeviceSerialNumber() {
-  // ✅ Fix 2: PostgreSQL-compatible regex and split_part instead of MySQL REGEXP and SUBSTRING_INDEX
-  const { rows } = await pool.query(`
-    SELECT MAX(CAST(split_part(device_serial_number, '-', 2) AS INTEGER)) AS max_serial
+  const [rows] = await pool.query(`
+    SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number, '-', 2), '-', -1) AS UNSIGNED)) AS max_serial
     FROM users
-    WHERE device_serial_number ~ '^NT-[0-9]+-TCL$'
+    WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'
   `);
 
-  const currentMax = Number(rows[0]?.max_serial || 0);
+  const currentMax = Number(rows?.[0]?.max_serial);
   const nextSequence = Number.isFinite(currentMax) ? currentMax + 1 : 1;
   return formatDeviceSerialNumber(nextSequence);
 }
@@ -163,12 +168,11 @@ async function generateNextDeviceSerialNumber() {
 router.get('/', authMiddleware, async (req, res) => {
   try {
     await ensureUsersStatusSchema();
-    // ✅ Fix 3: Fixed req.user reference
     if (!isAdminLike(req.user?.role)) {
       return res.status(403).json({ success: false, message: 'Only admin/supervisor can list all users' });
     }
 
-    const { rows: users } = await pool.query(
+    const [users] = await pool.query(
       'SELECT id, full_name, email, role, status, photo_url, contact, farm_size, farm_location, device_serial_number, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until, created_at FROM users ORDER BY created_at DESC'
     );
     
@@ -203,13 +207,14 @@ router.get('/', authMiddleware, async (req, res) => {
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
     await ensureUsersStatusSchema();
-    // ✅ Fix 3: Fixed req.user references
     const isAdmin = isAdminLike(req.user?.role);
     if (!isAdmin && req.params.id !== req.user?.uid) {
       return res.status(403).json({ success: false, message: 'You can only access your own profile' });
     }
 
-    const { rows: users } = await pool.query('SELECT id, full_name, email, role, status, photo_url, contact, farm_size, farm_location, device_serial_number, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until, created_at FROM users WHERE id = $1', [req.params.id]
+    const [users] = await pool.query(
+      'SELECT id, full_name, email, role, status, photo_url, contact, farm_size, farm_location, device_serial_number, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until, created_at FROM users WHERE id = ?',
+      [req.params.id]
     );
     
     if (users.length === 0) {
@@ -253,7 +258,9 @@ router.get('/otp/by-email', authMiddleware, async (req, res) => {
     }
 
     await ensureUsersStatusSchema();
-    const { rows } = await pool.query('SELECT id, email, role, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until FROM users WHERE LOWER(TRIM(email)) = $1 LIMIT 1', [email]
+    const [rows] = await pool.query(
+      'SELECT id, email, role, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1',
+      [email]
     );
 
     if (!rows.length) {
@@ -286,7 +293,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only admin/supervisor can delete users' });
     }
 
-    const { rows: targets } = await pool.query('SELECT role FROM users WHERE id = $1 LIMIT 1', [req.params.id]);
+    const [targets] = await pool.query('SELECT role FROM users WHERE id = ? LIMIT 1', [req.params.id]);
     if (!targets.length) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -295,7 +302,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, message: 'You do not have permission to delete this account.' });
     }
 
-    await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    await pool.query('DELETE FROM users WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: 'User deleted successfully' });
   } catch (error) {
     console.error('Delete user error:', error);
@@ -311,7 +318,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only admin/supervisor can update users' });
     }
 
-    const { rows: existingUsers } = await pool.query('SELECT id, full_name, email, role, status, photo_url, contact, farm_size, farm_location, device_serial_number FROM users WHERE id = $1', [req.params.id]
+    const [existingUsers] = await pool.query(
+      'SELECT id, full_name, email, role, status, photo_url, contact, farm_size, farm_location, device_serial_number FROM users WHERE id = ?',
+      [req.params.id]
     );
 
     if (existingUsers.length === 0) {
@@ -350,14 +359,18 @@ router.put('/:id', authMiddleware, async (req, res) => {
       if (!['admin', 'supervisor'].includes(requesterRole)) {
         return res.status(403).json({ success: false, message: 'Only admin/supervisor can assign supervisor role.' });
       }
-      const { rows: supervisors } = await pool.query('SELECT COUNT(*) AS total FROM users WHERE role = $1 AND id <> $2 LIMIT 1', ['supervisor', req.params.id]
+      const [supervisors] = await pool.query(
+        'SELECT COUNT(*) AS total FROM users WHERE role = ? AND id <> ? LIMIT 1',
+        ['supervisor', req.params.id]
       );
       if (Number(supervisors?.[0]?.total || 0) > 0) {
         return res.status(400).json({ success: false, message: 'Only one supervisor account is allowed.' });
       }
     }
 
-    const { rows: emailConflict } = await pool.query('SELECT id FROM users WHERE email = $1 AND id <> $2 LIMIT 1', [nextEmail, req.params.id]
+    const [emailConflict] = await pool.query(
+      'SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1',
+      [nextEmail, req.params.id]
     );
 
     if (emailConflict.length > 0) {
@@ -389,7 +402,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Farmer account requires farm size and farm location.' });
     }
 
-    await pool.query('UPDATE users SET full_name = $1, email = $2, role = $3, photo_url = $4, status = $5, contact = $6, farm_size = $7, farm_location = $8, device_serial_number = $9 WHERE id = $10', [
+    await pool.query(
+      'UPDATE users SET full_name = ?, email = ?, role = ?, photo_url = ?, status = ?, contact = ?, farm_size = ?, farm_location = ?, device_serial_number = ? WHERE id = ?',
+      [
         nextFullName,
         nextEmail,
         safeRole,
@@ -446,7 +461,7 @@ router.put('/:id/password', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
     }
 
-    const { rows: existingUsers } = await pool.query('SELECT id, role FROM users WHERE id = $1', [req.params.id]);
+    const [existingUsers] = await pool.query('SELECT id, role FROM users WHERE id = ?', [req.params.id]);
     if (existingUsers.length === 0) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -457,7 +472,7 @@ router.put('/:id/password', authMiddleware, async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(String(newPassword), 10);
-    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.params.id]);
+    await pool.query('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, req.params.id]);
 
     res.json({ success: true, message: 'Password reset successfully' });
   } catch (error) {
@@ -473,7 +488,9 @@ router.put('/:id/reactivate-seller', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only admin/supervisor can reactivate seller subscriptions' });
     }
 
-    const { rows: existingUsers } = await pool.query('SELECT id, can_sell, seller_paid_until FROM users WHERE id = $1', [req.params.id]
+    const [existingUsers] = await pool.query(
+      'SELECT id, can_sell, seller_paid_until FROM users WHERE id = ?',
+      [req.params.id]
     );
     if (existingUsers.length === 0) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -488,7 +505,9 @@ router.put('/:id/reactivate-seller', authMiddleware, async (req, res) => {
     const newPaidUntil = new Date();
     newPaidUntil.setDate(newPaidUntil.getDate() + 30);
 
-    await pool.query('UPDATE users SET seller_paid_until = $1 WHERE id = $2', [newPaidUntil, req.params.id]
+    await pool.query(
+      'UPDATE users SET seller_paid_until = ? WHERE id = ?',
+      [newPaidUntil, req.params.id]
     );
 
     res.json({

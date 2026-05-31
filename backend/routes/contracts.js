@@ -23,11 +23,10 @@ function formatDeviceSerialNumber(sequence) {
 }
 
 async function generateNextDeviceSerialNumber() {
-  // PostgreSQL: use split_part instead of SUBSTRING_INDEX, and ~ instead of REGEXP
-  const { rows } = await pool.query(`
-    SELECT MAX(CAST(split_part(device_serial_number, '-', 2) AS INTEGER)) AS max_serial
+  const [rows] = await pool.query(`
+    SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number, '-', 2), '-', -1) AS UNSIGNED)) AS max_serial
     FROM users
-    WHERE device_serial_number ~ '^NT-[0-9]+-TCL$'
+    WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'
   `);
 
   const currentMax = Number(rows?.[0]?.max_serial);
@@ -37,101 +36,101 @@ async function generateNextDeviceSerialNumber() {
 
 async function ensureContractsSchema() {
   if (contractsSchemaReady) return;
-  const client = await pool.connect();
+  const conn = await pool.getConnection();
   try {
     // Ensure buyer profile fields exist on `users` (older DBs may not have them).
+    // We keep this here because contracts list joins these columns.
     const userAlterStatements = [
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS contact VARCHAR(100) NULL",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_size VARCHAR(100) NULL",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_location VARCHAR(255) NULL",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS device_serial_number VARCHAR(100) NULL"
+      'ALTER TABLE users ADD COLUMN contact VARCHAR(100) NULL',
+      'ALTER TABLE users ADD COLUMN farm_size VARCHAR(100) NULL',
+      'ALTER TABLE users ADD COLUMN farm_location VARCHAR(255) NULL',
+      'ALTER TABLE users ADD COLUMN device_serial_number VARCHAR(100) NULL'
     ];
 
     for (const statement of userAlterStatements) {
-      await client.query(statement);
-      // PostgreSQL ADD COLUMN IF NOT EXISTS never throws a duplicate error
+      try {
+        await conn.query(statement);
+      } catch (error) {
+        if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+      }
     }
 
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_users_device_serial_number ON users(device_serial_number)
-    `);
+    try {
+      await conn.query('CREATE INDEX idx_users_device_serial_number ON users(device_serial_number)');
+    } catch (error) {
+      if (error.code !== 'ER_DUP_KEYNAME') throw error;
+    }
 
-    // PostgreSQL uses TEXT instead of MySQL ENUMs (or you can create PG types).
-    // Using VARCHAR with CHECK constraints here for simplicity and portability.
-    await client.query(`
+    await conn.query(`
       CREATE TABLE IF NOT EXISTS contracts (
-        id                   UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-        contract_number      VARCHAR(50)    UNIQUE NOT NULL,
-        buyer_name           VARCHAR(255)   NOT NULL,
-        buyer_email          VARCHAR(255)   NOT NULL,
-        buyer_phone          VARCHAR(50),
-        buyer_address        TEXT,
-        system_name          VARCHAR(255)   DEFAULT 'Eco-Smart Poultry Care System',
-        modules_included     TEXT,
-        hardware             TEXT,
-        quantity             INT            DEFAULT 1,
-        total_price_rwf      NUMERIC(15,2)  DEFAULT 0,
-        deposit_rwf          NUMERIC(15,2)  DEFAULT 0,
-        balance_rwf          NUMERIC(15,2)  DEFAULT 0,
-        payment_method       VARCHAR(20)    DEFAULT 'bank_transfer'
-                               CHECK (payment_method IN ('bank_transfer','mobile_money','cash','cheque')),
-        payment_status       VARCHAR(10)    DEFAULT 'pending'
-                               CHECK (payment_status IN ('pending','partial','paid')),
-        delivery_date        DATE,
-        warranty_months      INT            DEFAULT 12,
+        id              VARCHAR(36)    PRIMARY KEY,
+        contract_number VARCHAR(50)    UNIQUE NOT NULL,
+        buyer_name      VARCHAR(255)   NOT NULL,
+        buyer_email     VARCHAR(255)   NOT NULL,
+        buyer_phone     VARCHAR(50),
+        buyer_address   TEXT,
+        system_name     VARCHAR(255)   DEFAULT 'Eco-Smart Poultry Care System',
+        modules_included TEXT,
+        hardware        TEXT,
+        quantity        INT            DEFAULT 1,
+        total_price_rwf DECIMAL(15,2)  DEFAULT 0,
+        deposit_rwf     DECIMAL(15,2)  DEFAULT 0,
+        balance_rwf     DECIMAL(15,2)  DEFAULT 0,
+        payment_method  ENUM('bank_transfer','mobile_money','cash','cheque') DEFAULT 'bank_transfer',
+        payment_status  ENUM('pending','partial','paid')                     DEFAULT 'pending',
+        delivery_date   DATE,
+        warranty_months INT            DEFAULT 12,
         installation_address TEXT,
-        notes                TEXT,
-        status               VARCHAR(10)    DEFAULT 'draft'
-                               CHECK (status IN ('draft','active','completed','cancelled')),
-        buyer_user_id        UUID,
-        admin_id             UUID,
-        created_at           TIMESTAMPTZ    DEFAULT CURRENT_TIMESTAMP,
-        updated_at           TIMESTAMPTZ    DEFAULT CURRENT_TIMESTAMP
-      )
+        notes           TEXT,
+        status          ENUM('draft','active','completed','cancelled')       DEFAULT 'draft',
+        buyer_user_id   VARCHAR(36),
+        admin_id        VARCHAR(36),
+        created_at      TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     contractsSchemaReady = true;
   } finally {
-    client.release();
+    conn.release();
   }
 }
 
 // Auto-generate contract number: ESPCS-YYYY-NNN
 async function generateContractNumber() {
   const year = new Date().getFullYear();
-  const { rows } = await pool.query(
-    'SELECT COUNT(*) AS cnt FROM contracts WHERE EXTRACT(YEAR FROM created_at) = $1',
+  const [rows] = await pool.query(
+    'SELECT COUNT(*) AS cnt FROM contracts WHERE YEAR(created_at) = ?',
     [year]
   );
   const seq = (parseInt(rows[0].cnt, 10) || 0) + 1;
   return `ESPCS-${year}-${String(seq).padStart(3, '0')}`;
 }
 
-// ─── GET /api/contracts ──────────────────────────────────────────────────────
+// ─── GET /api/contracts ─────────────────────────────────────────────────────
 router.get('/', authMiddleware, async (req, res) => {
   try {
     await ensureContractsSchema();
     const isAdmin = isAdminLike(req.user?.role);
+    // Admin can pass ?userId= to filter by a specific buyer; farmer sees only own
     const filterUserId = isAdmin ? (req.query.userId || null) : req.user.uid;
-
-    const { rows } = await pool.query(`
+    const [rows] = await pool.query(`
       SELECT
         c.*,
-        u.full_name             AS buyer_user_name,
-        u.email                 AS buyer_user_email,
-        u.role                  AS buyer_user_role,
-        u.contact               AS buyer_user_contact,
-        u.farm_size             AS buyer_user_farm_size,
-        u.farm_location         AS buyer_user_farm_location,
-        u.device_serial_number  AS buyer_user_device_serial_number,
-        a.full_name             AS admin_name,
-        a.email                 AS admin_email
+        u.full_name  AS buyer_user_name,
+        u.email      AS buyer_user_email,
+        u.role       AS buyer_user_role,
+        u.contact    AS buyer_user_contact,
+        u.farm_size  AS buyer_user_farm_size,
+        u.farm_location AS buyer_user_farm_location,
+        u.device_serial_number AS buyer_user_device_serial_number,
+        a.full_name  AS admin_name,
+        a.email      AS admin_email
       FROM contracts c
       LEFT JOIN users u ON u.id = c.buyer_user_id
       LEFT JOIN users a ON a.id = c.admin_id
-      ${filterUserId ? 'WHERE c.buyer_user_id = $1' : ''}
+      ${filterUserId ? 'WHERE c.buyer_user_id = ?' : ''}
       ORDER BY c.created_at DESC
     `, filterUserId ? [filterUserId] : []);
-
     res.json({ success: true, contracts: rows });
   } catch (err) {
     console.error('List contracts error:', err);
@@ -144,12 +143,10 @@ router.get('/:id', authMiddleware, async (req, res) => {
   try {
     await ensureContractsSchema();
     const isAdmin = isAdminLike(req.user?.role);
-
-    const { rows } = await pool.query(
-      `SELECT * FROM contracts WHERE id = $1 ${isAdmin ? '' : 'AND buyer_user_id = $2'}`,
+    const [rows] = await pool.query(
+      `SELECT * FROM contracts WHERE id = ? ${isAdmin ? '' : 'AND buyer_user_id = ?'}`,
       isAdmin ? [req.params.id] : [req.params.id, req.user.uid]
     );
-
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Contract not found' });
     }
@@ -168,7 +165,7 @@ async function resolveBuyerUserId(buyer_user_id, status) {
     }
     return null;
   }
-  const { rows } = await pool.query('SELECT id FROM users WHERE id = $1', [buyer_user_id]);
+  const [rows] = await pool.query('SELECT id FROM users WHERE id = ?', [buyer_user_id]);
   if (!rows.length) {
     throw { status: 400, message: 'The selected buyer user was not found in the system.' };
   }
@@ -193,6 +190,7 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'buyer_name and buyer_email are required' });
     }
 
+    // Validate buyer_user_id — required when status is 'active'
     let resolvedBuyerUserId;
     try {
       resolvedBuyerUserId = await resolveBuyerUserId(buyer_user_id, status || 'draft');
@@ -200,28 +198,23 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(e.status || 400).json({ success: false, message: e.message });
     }
 
+    const [uuidRes] = await pool.query('SELECT UUID() AS uuid');
+    const id = uuidRes[0].uuid;
     const contract_number = await generateContractNumber();
     const total = parseFloat(total_price_rwf) || 0;
     const deposit = parseFloat(deposit_rwf) || 0;
     const balance_rwf = total - deposit;
 
-    // gen_random_uuid() is called inside the query — no separate UUID select needed
-    const { rows: created } = await pool.query(
+    await pool.query(
       `INSERT INTO contracts (
          id, contract_number, buyer_name, buyer_email, buyer_phone, buyer_address,
          system_name, modules_included, hardware, quantity,
          total_price_rwf, deposit_rwf, balance_rwf,
          payment_method, payment_status, delivery_date, warranty_months,
          installation_address, notes, status, buyer_user_id, admin_id
-       ) VALUES (
-         gen_random_uuid(),$1,$2,$3,$4,$5,
-         $6,$7,$8,$9,
-         $10,$11,$12,
-         $13,$14,$15,$16,
-         $17,$18,$19,$20,$21
-       ) RETURNING *`,
+       ) VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?)`,
       [
-        contract_number, buyer_name, buyer_email,
+        id, contract_number, buyer_name, buyer_email,
         buyer_phone || null, buyer_address || null,
         system_name || 'Eco-Smart Poultry Care System',
         modules_included || null, hardware || null, quantity || 1,
@@ -233,6 +226,7 @@ router.post('/', authMiddleware, async (req, res) => {
       ]
     );
 
+    const [created] = await pool.query('SELECT * FROM contracts WHERE id = ?', [id]);
     res.json({ success: true, contract: created[0] });
   } catch (err) {
     console.error('Create contract error:', err);
@@ -254,6 +248,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
       buyer_user_id
     } = req.body;
 
+    // Validate buyer_user_id — required when status is 'active'
     let resolvedBuyerUserId;
     try {
       resolvedBuyerUserId = await resolveBuyerUserId(buyer_user_id, status || 'draft');
@@ -265,16 +260,15 @@ router.put('/:id', authMiddleware, async (req, res) => {
     const deposit = parseFloat(deposit_rwf) || 0;
     const balance_rwf = total - deposit;
 
-    const { rows: updated } = await pool.query(
+    await pool.query(
       `UPDATE contracts SET
-         buyer_name=$1, buyer_email=$2, buyer_phone=$3, buyer_address=$4,
-         system_name=$5, modules_included=$6, hardware=$7, quantity=$8,
-         total_price_rwf=$9, deposit_rwf=$10, balance_rwf=$11,
-         payment_method=$12, payment_status=$13, delivery_date=$14,
-         warranty_months=$15, installation_address=$16, notes=$17, status=$18,
-         buyer_user_id=$19, updated_at=CURRENT_TIMESTAMP
-       WHERE id=$20
-       RETURNING *`,
+         buyer_name=?, buyer_email=?, buyer_phone=?, buyer_address=?,
+         system_name=?, modules_included=?, hardware=?, quantity=?,
+         total_price_rwf=?, deposit_rwf=?, balance_rwf=?,
+         payment_method=?, payment_status=?, delivery_date=?,
+         warranty_months=?, installation_address=?, notes=?, status=?,
+         buyer_user_id=?
+       WHERE id=?`,
       [
         buyer_name, buyer_email, buyer_phone || null, buyer_address || null,
         system_name || 'Eco-Smart Poultry Care System',
@@ -288,6 +282,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
       ]
     );
 
+    const [updated] = await pool.query('SELECT * FROM contracts WHERE id = ?', [req.params.id]);
     if (!updated.length) {
       return res.status(404).json({ success: false, message: 'Contract not found' });
     }
@@ -303,13 +298,8 @@ router.delete('/:id', authMiddleware, async (req, res) => {
   try {
     if (forbidIfNotAdmin(req, res)) return;
     await ensureContractsSchema();
-
-    const { rowCount } = await pool.query(
-      'DELETE FROM contracts WHERE id = $1',
-      [req.params.id]
-    );
-
-    if (rowCount === 0) {
+    const [result] = await pool.query('DELETE FROM contracts WHERE id = ?', [req.params.id]);
+    if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Contract not found' });
     }
     res.json({ success: true, message: 'Contract deleted' });
@@ -326,10 +316,7 @@ router.post('/:id/activate', authMiddleware, async (req, res) => {
     if (forbidIfNotAdmin(req, res)) return;
     await ensureContractsSchema();
 
-    const { rows } = await pool.query(
-      'SELECT * FROM contracts WHERE id = $1',
-      [req.params.id]
-    );
+    const [rows] = await pool.query('SELECT * FROM contracts WHERE id = ?', [req.params.id]);
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Contract not found' });
     }
@@ -341,6 +328,7 @@ router.post('/:id/activate', authMiddleware, async (req, res) => {
         message: 'Active contract must have an assigned buyer account.'
       });
     }
+
     if (contract.status === 'active' && contract.buyer_user_id) {
       return res.status(400).json({
         success: false,
@@ -352,8 +340,9 @@ router.post('/:id/activate', authMiddleware, async (req, res) => {
     let tempPassword = null;
 
     if (!userId) {
-      const { rows: existing } = await pool.query(
-        'SELECT id FROM users WHERE email = $1',
+      // Check for existing account with the buyer email
+      const [existing] = await pool.query(
+        'SELECT id FROM users WHERE email = ?',
         [contract.buyer_email]
       );
 
@@ -361,27 +350,29 @@ router.post('/:id/activate', authMiddleware, async (req, res) => {
         // Link to existing user — no new account created
         userId = existing[0].id;
       } else {
-        // Generate a secure temporary password
-        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-        tempPassword = Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-        const hashed = await bcrypt.hash(tempPassword, 10);
+      // Generate a secure temporary password
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+      tempPassword = Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+      const hashed = await bcrypt.hash(tempPassword, 10);
 
-        const deviceSerialNumber = await generateNextDeviceSerialNumber();
+      const [uuidRes] = await pool.query('SELECT UUID() AS uuid');
+      userId = uuidRes[0].uuid;
 
-        // gen_random_uuid() used inline; RETURNING id gives us the new UUID
-        const { rows: newUser } = await pool.query(
-          'INSERT INTO users (id, full_name, email, password, role, device_serial_number) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5) RETURNING id',
-          [contract.buyer_name, contract.buyer_email, hashed, 'farmer', deviceSerialNumber]
-        );
-        userId = newUser[0].id;
+      const deviceSerialNumber = await generateNextDeviceSerialNumber();
+
+      await pool.query(
+        'INSERT INTO users (id, full_name, email, password, role, device_serial_number) VALUES (?,?,?,?,?,?)',
+        [userId, contract.buyer_name, contract.buyer_email, hashed, 'farmer', deviceSerialNumber]
+      );
       }
     }
 
-    const { rows: final } = await pool.query(
-      "UPDATE contracts SET status='active', buyer_user_id=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2 RETURNING *",
+    await pool.query(
+      "UPDATE contracts SET status='active', buyer_user_id=? WHERE id=?",
       [userId, contract.id]
     );
 
+    const [final] = await pool.query('SELECT * FROM contracts WHERE id = ?', [contract.id]);
     res.json({
       success: true,
       contract: final[0],

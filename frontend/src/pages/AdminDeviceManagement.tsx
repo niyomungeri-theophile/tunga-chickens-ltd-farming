@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  HardDrive, Users, Search, Trash2, Link2, Unlink2,
-  Loader2, ChevronDown, CheckCircle, AlertCircle, Clock
+import { 
+  HardDrive, Users, Search, Trash2, Link2, Unlink2, 
+  Loader2, ChevronDown, CheckCircle, AlertCircle, Clock 
 } from 'lucide-react';
 import { db } from '../api';
 import { parseApiResponse } from '../utils/parseApiResponse';
@@ -80,7 +80,7 @@ const AdminDeviceManagement: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedUsersMap, setSelectedUsersMap] = useState<Record<string, string>>({});
+  const [selectedUsersMap, setSelectedUsersMap] = useState<Record<string,string>>({});
   const [assigningDevice, setAssigningDevice] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [assignModalOpen, setAssignModalOpen] = useState(false);
@@ -96,9 +96,6 @@ const AdminDeviceManagement: React.FC = () => {
     }
   }, [currentRole, navigate]);
 
-
-  console.log('users serials:', users.map(u => u.deviceSerialNumber));
-  console.log('device serials:', devices.map(d => d.device_serial));
   // Fetch all devices
   const fetchAllDevices = useCallback(async () => {
     try {
@@ -182,12 +179,11 @@ const AdminDeviceManagement: React.FC = () => {
     fetchAllDevices();
     fetchUnassignedDevices();
     fetchAllUsers();
-
+    
     // Refresh every 10 seconds
     const interval = setInterval(() => {
       fetchAllDevices();
       fetchUnassignedDevices();
-      fetchAllUsers()
     }, 10000);
 
     return () => clearInterval(interval);
@@ -206,7 +202,7 @@ const AdminDeviceManagement: React.FC = () => {
   const setDeviceSelectedUser = (deviceSerial: string, userId: string) => {
     setSelectedUsersMap(prev => {
       const next = { ...prev, [deviceSerial]: userId };
-      try { localStorage.setItem('deviceSelectedUsers', JSON.stringify(next)); } catch (e) { }
+      try { localStorage.setItem('deviceSelectedUsers', JSON.stringify(next)); } catch (e) {}
       return next;
     });
   };
@@ -215,7 +211,7 @@ const AdminDeviceManagement: React.FC = () => {
     setSelectedUsersMap(prev => {
       const next = { ...prev };
       delete next[deviceSerial];
-      try { localStorage.setItem('deviceSelectedUsers', JSON.stringify(next)); } catch (e) { }
+      try { localStorage.setItem('deviceSelectedUsers', JSON.stringify(next)); } catch (e) {}
       return next;
     });
   };
@@ -381,8 +377,9 @@ const AdminDeviceManagement: React.FC = () => {
         </div>
 
         {message && (
-          <div className={`mb-6 p-4 rounded-lg flex items-center gap-3 ${message.type === 'success' ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'
-            }`}>
+          <div className={`mb-6 p-4 rounded-lg flex items-center gap-3 ${
+            message.type === 'success' ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'
+          }`}>
             {message.type === 'success' ? (
               <CheckCircle className="w-5 h-5 text-green-600" />
             ) : (
@@ -424,7 +421,7 @@ const AdminDeviceManagement: React.FC = () => {
 
         {activeTab === 'all' && !loading && (
           <div className="space-y-4">
-            {filteredFarmerRows.length === 0 ? (
+              {filteredFarmerRows.length === 0 ? (
               <div className="bg-white rounded-lg p-8 text-center">
                 <HardDrive className="w-12 h-12 text-gray-300 mx-auto mb-4" />
                 <p className="text-gray-700">No farmer accounts found</p>
@@ -433,7 +430,7 @@ const AdminDeviceManagement: React.FC = () => {
             ) : (
               filteredFarmerRows.map((row) => (
                 <div key={row.id} className="bg-white rounded-lg p-6 border border-gray-200 hover:shadow-lg transition">
-                  <div className="grid grid-cols-1 md:grid-cols-5 gap-4 md:gap-2 items-start mb-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start mb-4">
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Serial Number</p>
                       <p className="font-mono font-bold text-gray-900 text-lg">{row.serial || 'Not assigned'}</p>
@@ -481,22 +478,12 @@ const AdminDeviceManagement: React.FC = () => {
 
                     <div>
                       <p className="text-sm text-gray-600 mb-1">First Seen</p>
-                      <p className="text-sm text-gray-700">
-                        {row.device?.linked_at ? new Date(row.device.linked_at).toLocaleDateString('en-GB') : '—'}
-                      </p>
-
+                      <p className="text-sm text-gray-700">{row.device?.first_seen ? new Date(row.device.first_seen).toLocaleDateString('en-GB') : '—'}</p>
                     </div>
-
-
-
 
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Last Seen</p>
-                      <p className="text-sm text-gray-700">{row.device?.last_seen ? formatTimestamp(row.device?.last_seen) : 'no data provided'}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Linked User</p>
-                      <p className="text-sm text-green-500">{row.fullName ? `${row.fullName} ---> ${row.email}` : 'Not assigned'}</p>
+                      <p className="text-sm text-gray-700">{formatTimestamp(row.device?.last_seen)}</p>
                     </div>
                   </div>
                 </div>
@@ -573,7 +560,7 @@ const AdminDeviceManagement: React.FC = () => {
                         value={selectedUsersMap[row.serial] || ''}
                         onChange={(e) => setDeviceSelectedUser(row.serial, e.target.value)}
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black bg-white"
-                        disabled={!canAssignRow(row)}
+                          disabled={!canAssignRow(row)}
                       >
                         <option value="" className="text-black" style={{ color: '#000' }}>Select a user...</option>
                         {getAvailableUsers().map((user) => (
@@ -584,17 +571,17 @@ const AdminDeviceManagement: React.FC = () => {
                       </select>
                       <button
                         onClick={() => handleAssignDevice(row.serial)}
-                        disabled={!canAssignRow(row) || !selectedUsersMap[row.serial] || assigningDevice === row.serial}
-                        className={`px-4 py-2 rounded-md transition flex items-center gap-2 ${!canAssignRow(row) ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed'}`}
+                          disabled={!canAssignRow(row) || !selectedUsersMap[row.serial] || assigningDevice === row.serial}
+                          className={`px-4 py-2 rounded-md transition flex items-center gap-2 ${!canAssignRow(row) ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed'}`}
                       >
                         {assigningDevice === row.serial && <Loader2 className="w-4 h-4 animate-spin" />}
                         <Link2 className="w-4 h-4" />
                         Assign
                       </button>
                     </div>
-                    {!row.chipId && (
-                      <p className="mt-2 text-xs text-amber-700">Chip ID missing, so user selection is locked.</p>
-                    )}
+                      {!row.chipId && (
+                        <p className="mt-2 text-xs text-amber-700">Chip ID missing, so user selection is locked.</p>
+                      )}
                   </div>
                 </div>
               ))

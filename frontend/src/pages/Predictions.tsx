@@ -3,11 +3,11 @@ import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 import { useParams } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
-import {
-  BrainCircuit,
-  Calendar,
-  CheckCircle2,
-  Lightbulb,
+import { 
+  BrainCircuit, 
+  Calendar, 
+  CheckCircle2, 
+  Lightbulb, 
   Sparkles,
   AlertCircle
 } from 'lucide-react';
@@ -346,8 +346,8 @@ const Predictions: React.FC = () => {
     const normalized = label.toLowerCase();
     const feedbackStatus: PredictionResult['feedbackStatus'] =
       normalized.includes('normal') ? 'Good' :
-        normalized.includes('mild') ? 'Normal' :
-          'Risks';
+      normalized.includes('mild') ? 'Normal' :
+      'Risks';
 
     const hatchRate = typeof confidence === 'number' ? Math.round(confidence * 100) : 50;
 
@@ -358,8 +358,8 @@ const Predictions: React.FC = () => {
     const riskNotesBase = feedbackStatus === 'Good'
       ? 'Model indicates stable conditions.'
       : feedbackStatus === 'Normal'
-        ? 'Model indicates mild stress; small adjustments recommended.'
-        : 'Model indicates elevated risk; immediate action recommended.';
+      ? 'Model indicates mild stress; small adjustments recommended.'
+      : 'Model indicates elevated risk; immediate action recommended.';
 
     const suggestionsByLabel: Record<string, PredictionResult['suggestions']> = {
       'normal condition': [
@@ -636,19 +636,19 @@ const Predictions: React.FC = () => {
             <div className="bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-200/70 dark:border-white/10 shadow p-4">
               <h2 className="text-sm font-black text-slate-800 dark:text-white tracking-tight text-center mb-2">Gas Concentration Levels</h2>
               <div className="h-52">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={history} margin={{ top: 6, right: 70, left: -22, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
-                    <YAxis tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
-                    <Tooltip contentStyle={{ borderRadius: 16, border: '1px solid rgba(148,163,184,0.25)' }} labelStyle={{ fontWeight: 900 }} />
-                    <Legend layout="vertical" align="right" verticalAlign="middle" iconType="line" wrapperStyle={{ fontSize: 11, fontWeight: 800 }} />
-                    <Line type="monotone" dataKey="o2" name="O₂" stroke="#16a34a" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="co2" name="CO₂" stroke="#ef4444" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="ch4" name="Methane" stroke="#f97316" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="nh3" name="NH₃" stroke="#eab308" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={history} margin={{ top: 6, right: 70, left: -22, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
+                <YAxis tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
+                <Tooltip contentStyle={{ borderRadius: 16, border: '1px solid rgba(148,163,184,0.25)' }} labelStyle={{ fontWeight: 900 }} />
+                <Legend layout="vertical" align="right" verticalAlign="middle" iconType="line" wrapperStyle={{ fontSize: 11, fontWeight: 800 }} />
+                <Line type="monotone" dataKey="o2" name="O₂" stroke="#16a34a" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" dataKey="co2" name="CO₂" stroke="#ef4444" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" dataKey="ch4" name="Methane" stroke="#f97316" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" dataKey="nh3" name="NH₃" stroke="#eab308" strokeWidth={2.5} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
               </div>
               <div className="mt-1 text-center text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">Time</div>
               <div className="mt-2 text-center text-sm font-bold text-amber-700">
@@ -659,17 +659,17 @@ const Predictions: React.FC = () => {
             <div className="bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-200/70 dark:border-white/10 shadow p-4">
               <h2 className="text-sm font-black text-slate-800 dark:text-white tracking-tight text-center mb-2">Environmental Conditions</h2>
               <div className="h-52">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={history} margin={{ top: 6, right: 70, left: -22, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
-                    <YAxis tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
-                    <Tooltip contentStyle={{ borderRadius: 16, border: '1px solid rgba(148,163,184,0.25)' }} labelStyle={{ fontWeight: 900 }} />
-                    <Legend layout="vertical" align="right" verticalAlign="middle" iconType="line" wrapperStyle={{ fontSize: 11, fontWeight: 800 }} />
-                    <Line type="monotone" dataKey="temp" name="Temperature (°C)" stroke="#ef4444" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="hum" name="Humidity (%)" stroke="#2563eb" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={history} margin={{ top: 6, right: 70, left: -22, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
+                <YAxis tick={{ fontSize: 10, fontWeight: 800 }} stroke="rgba(100,116,139,0.7)" />
+                <Tooltip contentStyle={{ borderRadius: 16, border: '1px solid rgba(148,163,184,0.25)' }} labelStyle={{ fontWeight: 900 }} />
+                <Legend layout="vertical" align="right" verticalAlign="middle" iconType="line" wrapperStyle={{ fontSize: 11, fontWeight: 800 }} />
+                <Line type="monotone" dataKey="temp" name="Temperature (°C)" stroke="#ef4444" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" dataKey="hum" name="Humidity (%)" stroke="#2563eb" strokeWidth={2.5} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
               </div>
             </div>
 
@@ -720,10 +720,7 @@ const Predictions: React.FC = () => {
                     endDate={endDate}
                     onChange={(update) => setDateRange(update)}
                     isClearable={true}
-                    maxDate={new Date()}
-                    
-                    placeholderText="Select date range..."
-                    className="border border-slate-300 rounded px-3 py-2 text-sm text-slate-900 bg-white placeholder-slate-400 cursor-pointer caret-transparent"
+                    className="border border-slate-300 rounded px-3 py-2 text-sm text-slate-900 bg-white placeholder-slate-400"
                   />
                 </div>
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -752,7 +749,7 @@ const Predictions: React.FC = () => {
                       <div className="text-2xl font-black text-slate-900 mb-1">{result.diseaseName || 'No Disease Detected'}</div>
                       <div className="text-lg font-bold text-slate-700 mb-3">Risk Level: <span className="text-rose-600">{result.riskLevel || 'Low'}</span></div>
                       <div className="text-center text-base text-slate-700 mb-4 font-medium">{result.riskNotes}</div>
-
+                      
                       {/* Sensor Readings Grid */}
                       {result.sensorReadings && (
                         <div className="w-full mt-4 pt-4 border-t border-slate-200">
@@ -869,7 +866,7 @@ const SuggestionItem = ({ type, title, desc }: { type: 'success' | 'warning' | '
     <div className={`p-6 rounded-[2rem] border transition-all hover:scale-[1.01] hover:shadow-lg ${styles[type]}`}>
       <div className="flex items-start gap-4">
         <div className="mt-1 flex-shrink-0 p-2 bg-white dark:bg-slate-900 rounded-xl shadow-sm">
-          <Sparkles size={18} />
+           <Sparkles size={18} />
         </div>
         <div>
           <h4 className="font-black text-base mb-1 tracking-tight">{title}</h4>

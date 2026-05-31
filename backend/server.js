@@ -1,10 +1,4 @@
-const path = require('path');
-
-require('dotenv').config({
-  path: path.resolve(__dirname, '.env')
-});
-console.log('ENV FILE:', path.resolve(__dirname, '.env'));
-console.log('DATABASE_URL:', process.env.DATABASE_URL);
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -56,11 +50,12 @@ app.use((err, req, res, next) => {
 });
 
 // Serve uploaded video/image files as static assets
-
+const path = require('path');
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 const { router: authRoutes } = require('./routes/auth');
+
 const usersRoutes = require('./routes/users');
 const devicesRoutes = require('./routes/devices');
 const sensorsRoutes = require('./routes/sensors');
@@ -74,9 +69,11 @@ const predictionsRoutes = require('./routes/predictions');
 const recommendationsRoutes = require('./routes/recommendations');
 const feedLogsRoutes = require('./routes/feedLogs');
 const announcementsRoutes = require('./routes/announcements');
+
 const teamMembersRoutes = require('./routes/teamMembers');
 const productsRoutes = require('./routes/products');
 const sellerApplicationsRoutes = require('./routes/sellerApplications');
+
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
@@ -94,6 +91,8 @@ app.use('/api/feed-logs', feedLogsRoutes);
 app.use('/api/announcements', announcementsRoutes);
 app.use('/api/team-members', teamMembersRoutes);
 app.use('/api/seller-applications', sellerApplicationsRoutes);
+
+// Products API
 app.use('/api/products', productsRoutes);
 
 // Auto-delete announcements older than 1 day
@@ -102,12 +101,11 @@ const AUTO_DELETE_INTERVAL_MS = 60 * 60 * 1000; // Check every hour
 
 setInterval(async () => {
   try {
-    // PostgreSQL: use INTERVAL '1 day' and rowCount instead of affectedRows
-    const result = await db.query(
-      "DELETE FROM announcements WHERE created_at < (NOW() - INTERVAL '1 day')"
+    const [result] = await db.execute(
+      'DELETE FROM announcements WHERE created_at < (NOW() - INTERVAL 1 DAY)'
     );
-    if (result.rowCount > 0) {
-      console.log(`Auto-deleted ${result.rowCount} old announcements`);
+    if (result.affectedRows > 0) {
+      console.log(`Auto-deleted ${result.affectedRows} old announcements`);
     }
   } catch (err) {
     console.error('Auto-delete error:', err.message);
@@ -136,6 +134,7 @@ server.listen(PORT, '0.0.0.0', () => {
 io.on('connection', (socket) => {
   console.log(`✓ Client connected: ${socket.id}`);
 
+  // Join a prediction room for a specific user
   socket.on('join-predictions', (userId) => {
     if (userId) {
       socket.join(`predictions:${userId}`);

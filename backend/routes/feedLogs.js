@@ -21,18 +21,29 @@ async function ensureFeedingLogsSchema() {
       farm_location VARCHAR(255) NULL,
       feed_type VARCHAR(120) NOT NULL,
       quantity_kg DECIMAL(10,3) NOT NULL,
-      fed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
+      fed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_feeding_logs_user_id (user_id),
+      INDEX idx_feeding_logs_fed_at (fed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
   // Best-effort schema upgrades for existing installations.
   // Ignore errors (e.g. duplicate columns or unsupported defaults).
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_feeding_logs_user_id ON feeding_logs(user_id)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_feeding_logs_fed_at ON feeding_logs(fed_at)');
+  const alters = [
+    'ALTER TABLE feeding_logs ADD COLUMN farm_size VARCHAR(100) NULL',
+    'ALTER TABLE feeding_logs ADD COLUMN farm_location VARCHAR(255) NULL',
+    'ALTER TABLE feeding_logs MODIFY fed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP',
+  ];
 
-  try { await pool.query('ALTER TABLE feeding_logs ADD COLUMN IF NOT EXISTS farm_size VARCHAR(100) NULL'); } catch (e) { }
-  try { await pool.query('ALTER TABLE feeding_logs ADD COLUMN IF NOT EXISTS farm_location VARCHAR(255) NULL'); } catch (e) { }
+  for (const sql of alters) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await pool.query(sql);
+    } catch (e) {
+      // ignore
+    }
+  }
 
   feedingLogsSchemaReady = true;
 }
@@ -59,8 +70,8 @@ router.get('/', authMiddleware, async (req, res) => {
   try {
     await ensureFeedingLogsSchema();
 
-    const limit = clampInt(req.query.limit, 1, 200, 50);
-    const requestedUserId = String(req.query.userId || '').trim();
+    const limit = clampInt(req.query?.limit, 1, 200, 50);
+    const requestedUserId = String(req.query?.userId || '').trim();
     const adminLike = isAdminLike(req.user?.role);
 
     if (requestedUserId && !adminLike) {
@@ -68,7 +79,9 @@ router.get('/', authMiddleware, async (req, res) => {
     }
 
     const targetUserId = adminLike && requestedUserId ? requestedUserId : req.user.uid;
-    const { rows } = await pool.query('SELECT * FROM feeding_logs WHERE user_id = $1 ORDER BY fed_at DESC LIMIT $2', [targetUserId, limit]
+    const [rows] = await pool.query(
+      'SELECT * FROM feeding_logs WHERE user_id = ? ORDER BY fed_at DESC LIMIT ?',
+      [targetUserId, limit]
     );
 
     return res.json({ success: true, logs: rows || [] });
@@ -110,13 +123,13 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'feedType is required' });
     }
 
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
 
     let farmSize = null;
     let farmLocation = null;
     try {
-      const { rows: userRows } = await pool.query('SELECT farm_size, farm_location FROM users WHERE id = $1', [targetUserId]);
+      const [userRows] = await pool.query('SELECT farm_size, farm_location FROM users WHERE id = ?', [targetUserId]);
       const u = userRows?.[0];
       farmSize = u?.farm_size ?? null;
       farmLocation = u?.farm_location ?? null;
@@ -124,22 +137,24 @@ router.post('/', authMiddleware, async (req, res) => {
       // If users table isn't reachable for any reason, still allow feeding log save.
     }
 
-    await pool.query(`INSERT INTO feeding_logs (
+    await pool.query(
+      `INSERT INTO feeding_logs (
         id, user_id, chick_category, chick_specific_type, age_months, flock_size,
         farm_size, farm_location,
         feed_type, quantity_kg, fed_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`, [
-      id,
-      targetUserId,
-      chickCategory,
-      chickSpecificType,
-      ageMonths,
-      flockSize,
-      farmSize,
-      farmLocation,
-      feedType,
-      quantityKg,
-    ]
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())` ,
+      [
+        id,
+        targetUserId,
+        chickCategory,
+        chickSpecificType,
+        ageMonths,
+        flockSize,
+        farmSize,
+        farmLocation,
+        feedType,
+        quantityKg,
+      ]
     );
 
     return res.json({ success: true, id, message: 'Feeding log saved' });
@@ -168,7 +183,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
 
     const targetUserId = adminLike && requestedUserId ? requestedUserId : req.user.uid;
 
-    const { rows: existingRows } = await pool.query('SELECT * FROM feeding_logs WHERE id = $1 AND user_id = $2 LIMIT 1', [id, targetUserId]
+    const [existingRows] = await pool.query(
+      'SELECT * FROM feeding_logs WHERE id = ? AND user_id = ? LIMIT 1',
+      [id, targetUserId]
     );
     const existing = existingRows?.[0];
     if (!existing) {
@@ -204,18 +221,20 @@ router.put('/:id', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'feedType is required' });
     }
 
-    await pool.query(`UPDATE feeding_logs
-       SET chick_category = $1, chick_specific_type = $2, age_months = $3, flock_size = $4, feed_type = $5, quantity_kg = $6
-       WHERE id = $7 AND user_id = $8`, [
-      chickCategory,
-      chickSpecificType,
-      ageMonths,
-      flockSize,
-      feedType,
-      quantityKg,
-      id,
-      targetUserId,
-    ]
+    await pool.query(
+      `UPDATE feeding_logs
+       SET chick_category = ?, chick_specific_type = ?, age_months = ?, flock_size = ?, feed_type = ?, quantity_kg = ?
+       WHERE id = ? AND user_id = ?`,
+      [
+        chickCategory,
+        chickSpecificType,
+        ageMonths,
+        flockSize,
+        feedType,
+        quantityKg,
+        id,
+        targetUserId,
+      ]
     );
 
     return res.json({ success: true, message: 'Feeding log updated' });
@@ -244,8 +263,12 @@ router.delete('/:id', authMiddleware, async (req, res) => {
 
     const targetUserId = adminLike && requestedUserId ? requestedUserId : req.user.uid;
 
-    const result = await pool.query('DELETE FROM feeding_logs WHERE id = $1 AND user_id = $2', [id, targetUserId]);
-    if (result.rowCount === 0) {
+    const [result] = await pool.query(
+      'DELETE FROM feeding_logs WHERE id = ? AND user_id = ?',
+      [id, targetUserId]
+    );
+
+    if (!result?.affectedRows) {
       return res.status(404).json({ success: false, message: 'Feeding log not found' });
     }
 
