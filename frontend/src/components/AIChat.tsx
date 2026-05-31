@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { MessageSquare, Send, X, Bot, User, Loader2, Sparkles, AlertCircle, Trash2 } from 'lucide-react';
+import { MessageSquare, Send, X, Sparkles, AlertCircle, Trash2 } from 'lucide-react';
 import { parseApiResponse } from '../utils/parseApiResponse';
 
 interface Message {
@@ -351,7 +351,7 @@ const AIChat: React.FC = () => {
         </div>
       )}
       
-      <style jsx>{`
+      <style >{`
         @keyframes ping {
           75%, 100% {
             transform: scale(2);
