@@ -4,6 +4,7 @@ const pool = require('../config/db');
 const { authMiddleware } = require('./auth');
 const fs = require('fs');
 const path = require('path');
+const cloudinary = require('cloudinary').v2;
 
 /**
  * For any base64 data-URL (image or video), decode to disk and return
@@ -11,27 +12,27 @@ const path = require('path');
  * For plain external URLs (http/https/already a path) return unchanged.
  * This keeps MySQL free of large binary data entirely.
  */
-function saveMediaToDisk(id, mediaType, mediaDataUrl) {
-  // External URL or already a server path → store as-is
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+async function saveMediaToCloud(id, mediaType, mediaDataUrl) {
+  // Already an external URL — store as-is
   if (!mediaDataUrl.startsWith('data:')) return mediaDataUrl;
 
-  const match = mediaDataUrl.match(/^data:([^;]+);base64,([\s\S]+)$/);
-  if (!match) return mediaDataUrl;
+  const resourceType = mediaType === 'video' ? 'video' : 'image';
 
-  const mime = match[1]; // e.g. 'image/jpeg' or 'video/mp4'
-  const ext = (mime.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  const folder = mediaType === 'video' ? 'videos' : 'images';
-  const filename = `${id}.${ext}`;
+  const result = await cloudinary.uploader.upload(mediaDataUrl, {
+    public_id: `hero_media/${id}`,
+    resource_type: resourceType,
+    overwrite: true,
+  });
 
-  const targetDir = path.join(__dirname, '..', 'uploads', folder);
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
-  }
-
-  fs.writeFileSync(path.join(targetDir, filename), Buffer.from(match[2], 'base64'));
-  return `/uploads/${folder}/${filename}`;
+  return result.secure_url;
 }
-
 let tableEnsured = false;
 
 async function ensureHeroMediaTable() {
@@ -88,7 +89,7 @@ router.post('/', authMiddleware, async (req, res) => {
 
     // For any base64 data-URL, write to disk instead of MySQL (avoids max_allowed_packet)
     // For external http/https URLs, stored directly as-is
-    const storageUrl = saveMediaToDisk(id, mediaType, mediaDataUrl);
+    const storageUrl = await saveMediaToCloud(id, mediaType, mediaDataUrl);
 
     await pool.query(`INSERT INTO hero_media (id, title, description, media_type, media_data_url, display_order)
        VALUES ($1, $2, $3, $4, $5, $6)`, [id, String(title).trim(), String(description).trim(), mediaType, storageUrl, Number(displayOrder) || 1]
@@ -139,10 +140,13 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     );
 
     // Remove disk file if it was saved there
-    if (storedUrl.startsWith('/uploads/')) {
-      const diskPath = path.join(__dirname, '..', storedUrl);
-      try { fs.unlinkSync(diskPath); } catch (_) { /* already gone */ }
-    }
+   if (storedUrl.includes('cloudinary.com')) {
+  try {
+    const publicId = `hero_media/${id}`;
+    await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+  } catch (_) {}
+}
+
 
     return res.json({ success: true, message: 'Hero media deleted successfully.' });
   } catch (error) {
