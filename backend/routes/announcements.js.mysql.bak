@@ -8,11 +8,11 @@ let announcementsSchemaReady = false;
 async function ensureAnnouncementsSchema() {
   if (announcementsSchemaReady) return;
   try {
-    await db.query(
-      "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS user_role VARCHAR(50) DEFAULT 'user'"
+    await db.execute(
+      "ALTER TABLE announcements ADD COLUMN user_role VARCHAR(50) DEFAULT 'user'"
     );
   } catch (err) {
-    if (err.code !== '42701') { // PostgreSQL error code for duplicate column
+    if (err.code !== 'ER_DUP_FIELDNAME') {
       throw err;
     }
   }
@@ -36,8 +36,8 @@ router.use(async (req, res, next) => {
 // GET all announcements (last 24 hours) - PUBLIC (everyone can view)
 router.get('/', async (req, res) => {
   try {
-    const { rows } = await db.query(
-      "SELECT * FROM announcements WHERE created_at >= NOW() - INTERVAL '1 day' ORDER BY created_at DESC"
+    const [rows] = await db.execute(
+      'SELECT * FROM announcements WHERE created_at >= (NOW() - INTERVAL 1 DAY) ORDER BY created_at DESC'
     );
     res.json({ success: true, data: rows });
   } catch (err) {
@@ -73,16 +73,16 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(401).json({ success: false, message: 'User ID not found' });
     }
 
-    const result = await db.query(
+    const result = await db.execute(
       `INSERT INTO announcements (name, phone, email, message, user_id, user_role, created_at) 
-       VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING id`,
+       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
       [name.trim(), phone.trim(), email.trim(), message.trim(), user_id, user_role || 'user']
     );
 
     res.json({ 
       success: true, 
       message: 'Announcement posted successfully',
-      id: result.rows[0]?.id 
+      id: result[0].insertId 
     });
   } catch (err) {
     console.error('Error posting announcement:', err);
@@ -107,7 +107,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
     }
 
     // Check if announcement exists and get its owner
-    const { rows } = await db.query('SELECT user_id FROM announcements WHERE id = $1', [id]);
+    const [rows] = await db.execute('SELECT user_id FROM announcements WHERE id = ?', [id]);
     
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Announcement not found' });
@@ -124,8 +124,8 @@ router.put('/:id', authMiddleware, async (req, res) => {
       });
     }
 
-    await db.query(
-      'UPDATE announcements SET name=$1, phone=$2, email=$3, message=$4 WHERE id=$5',
+    await db.execute(
+      'UPDATE announcements SET name=?, phone=?, email=?, message=? WHERE id=?',
       [name.trim(), phone.trim(), email.trim(), message.trim(), id]
     );
 
@@ -148,7 +148,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     const user_role = req.user?.role;
 
     // Check if announcement exists and get its owner
-    const { rows } = await db.query('SELECT user_id FROM announcements WHERE id = $1', [id]);
+    const [rows] = await db.execute('SELECT user_id FROM announcements WHERE id = ?', [id]);
     
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Announcement not found' });
@@ -165,7 +165,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       });
     }
 
-    await db.query('DELETE FROM announcements WHERE id = $1', [id]);
+    await db.execute('DELETE FROM announcements WHERE id = ?', [id]);
 
     res.json({ success: true, message: 'Announcement deleted successfully' });
   } catch (err) {

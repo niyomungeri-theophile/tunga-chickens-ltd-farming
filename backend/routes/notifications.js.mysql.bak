@@ -48,7 +48,9 @@ router.post('/prediction-alert', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Target user not found.' });
     }
 
-    const { rows: rows } = await pool.query('SELECT id, full_name, email, role, status FROM users WHERE id = $1 LIMIT 1', [targetUserId]
+    const [rows] = await pool.query(
+      'SELECT id, full_name, email, role, status FROM users WHERE id = ? LIMIT 1',
+      [targetUserId]
     );
 
     if (!rows.length) {

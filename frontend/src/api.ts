@@ -1,3 +1,13 @@
+
+interface ApiResponse {
+  success?: boolean;
+  message?: string;
+  token?: string;
+  user?: any;
+  users?: any[];
+  data?: any;
+  [key: string]: any; // allows any other properties
+}
 // API Client for MySQL Backend
 import { parseApiResponse } from './utils/parseApiResponse';
 // Replaces Firebase SDK
@@ -5,33 +15,32 @@ import { parseApiResponse } from './utils/parseApiResponse';
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 // Auth state management
-let authToken: string | null = localStorage.getItem('authToken');
+let authToken: string | null | undefined = localStorage.getItem('authToken');
 let currentUser: any = null;
 let authStateListeners: ((user: any) => void)[] = [];
 
 // Helper function for API calls
-export async function apiCall(endpoint: string, options: RequestInit = {}) {
+// AFTER
+export async function apiCall(endpoint: string, options: RequestInit = {}): Promise<ApiResponse> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> || {})
   };
-  
+
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
-  
+
   const response = await fetch(`${API_BASE_URL}${endpoint}`, {
     ...options,
     headers
   });
 
-  // Read as text first, then parse if not empty
   const text = await response.text();
-  let data = {};
+  let data: ApiResponse = {};
   try {
     data = text ? JSON.parse(text) : {};
   } catch (e) {
-    // If parsing fails, keep data as empty object
     data = {};
   }
 
@@ -54,7 +63,7 @@ export const auth = {
     
     if (result.success) {
       authToken = result.token;
-      localStorage.setItem('authToken', result.token);
+      if(result.token){localStorage.setItem('authToken', result.token)};
       currentUser = result.user;
       this.currentUser = result.user;
       notifyAuthStateListeners(result.user);
