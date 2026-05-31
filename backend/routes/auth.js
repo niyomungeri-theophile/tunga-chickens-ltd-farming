@@ -9,37 +9,53 @@ const LOCK_MESSAGE = 'Hello your system was locked. Contact admin for support 07
 let usersStatusSchemaReady = false;
 let authSessionsSchemaReady = false;
 
-// ✅ Replace with:
 async function ensureUsersStatusSchema() {
   if (usersStatusSchemaReady) return;
-  try {
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'");
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS contact VARCHAR(100) NULL');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_size VARCHAR(100) NULL');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_location VARCHAR(255) NULL');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS device_serial_number VARCHAR(100) NULL');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS can_sell SMALLINT NOT NULL DEFAULT 0');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp VARCHAR(20) NULL');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp_expires_at TIMESTAMP NULL');
-    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_paid_until TIMESTAMP NULL');
+  
+  const alterations = [
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'",
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS contact VARCHAR(100) NULL',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_size VARCHAR(100) NULL',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS farm_location VARCHAR(255) NULL',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS device_serial_number VARCHAR(100) NULL',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS can_sell SMALLINT NOT NULL DEFAULT 0',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp VARCHAR(20) NULL',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp_expires_at TIMESTAMP NULL',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_paid_until TIMESTAMP NULL',
+  ];
 
+  // Try each ALTER individually - continue even if one fails
+  for (const sql of alterations) {
+    try {
+      await pool.query(sql);
+    } catch (err) {
+      // Column already exists with different type or other issue - safe to ignore
+      console.log(`Skipping ALTER: ${err.message}`);
+    }
+  }
+
+  // Update seller expiry dates if needed
+  try {
     await pool.query(`
       UPDATE users
       SET seller_otp_expires_at = created_at + INTERVAL '30 days',
           seller_paid_until = created_at + INTERVAL '30 days'
       WHERE role = 'customer' AND can_sell = 1 AND seller_otp_expires_at IS NULL
     `);
-
-    try {
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_users_device_serial_number ON users(device_serial_number)');
-    } catch (_) { }
-
-    usersStatusSchemaReady = true;
-  } catch (error) {
-    console.error('ensureUsersStatusSchema error:', error);
-    throw error;
+  } catch (err) {
+    console.log('Could not update seller expiry dates:', err.message);
   }
+
+  // Create index
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_device_serial_number ON users(device_serial_number)');
+  } catch (err) {
+    console.log('Could not create index:', err.message);
+  }
+
+  usersStatusSchemaReady = true;
 }
+
 function isAdminLike(role) {
   return ['admin', 'supervisor'].includes(String(role || '').toLowerCase());
 }
@@ -61,15 +77,10 @@ async function generateNextDeviceSerialNumber() {
   `);
 
   const currentMax = Number(rows[0]?.max_serial || 0);
-
-  const nextSequence = Number.isFinite(currentMax)
-    ? currentMax + 1
-    : 1;
-
+  const nextSequence = Number.isFinite(currentMax) ? currentMax + 1 : 1;
   return formatDeviceSerialNumber(nextSequence);
 }
 
-// ✅ Replace with:
 async function ensureAuthSessionsSchema() {
   if (authSessionsSchemaReady) return;
 
@@ -89,6 +100,7 @@ async function ensureAuthSessionsSchema() {
 
   authSessionsSchemaReady = true;
 }
+
 // Middleware to verify JWT token
 const authMiddleware = async (req, res, next) => {
   try {
@@ -99,11 +111,12 @@ const authMiddleware = async (req, res, next) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     await ensureUsersStatusSchema();
-    const { rows: rows } = await pool.query('SELECT role, status, can_sell, seller_paid_until FROM users WHERE id = $1 LIMIT 1', [decoded.uid]
-    );
+    const { rows } = await pool.query('SELECT role, status, can_sell, seller_paid_until FROM users WHERE id = $1 LIMIT 1', [decoded.uid]);
+    
     if (!rows.length) {
       return res.status(401).json({ success: false, message: 'Invalid token' });
     }
+    
     const status = String(rows[0].status || 'active').toLowerCase();
     if (status !== 'active') {
       return res.status(403).json({ success: false, message: LOCK_MESSAGE });
@@ -174,7 +187,8 @@ router.post('/register', authMiddleware, async (req, res) => {
       : null;
 
     // Insert user
-    await pool.query('INSERT INTO users (id, full_name, email, password, role, status, photo_url, contact, farm_size, farm_location, device_serial_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)', [
+    await pool.query(`INSERT INTO users (id, full_name, email, password, role, status, photo_url, contact, farm_size, farm_location, device_serial_number) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [
       id,
       fullName,
       email,
@@ -186,8 +200,7 @@ router.post('/register', authMiddleware, async (req, res) => {
       normalizedRole === 'farmer' ? farmSize : null,
       normalizedRole === 'farmer' ? farmLocation : null,
       generatedDeviceSerialNumber
-    ]
-    );
+    ]);
 
     res.json({
       success: true,
@@ -220,7 +233,8 @@ router.post('/register-customer', async (req, res) => {
     const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
     const id = uuidResult[0].uuid;
 
-    await pool.query('INSERT INTO users (id, full_name, email, password, role, status, photo_url, contact, farm_size, farm_location, device_serial_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)', [
+    await pool.query(`INSERT INTO users (id, full_name, email, password, role, status, photo_url, contact, farm_size, farm_location, device_serial_number) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [
       id,
       fullName,
       normalizedEmail,
@@ -232,8 +246,7 @@ router.post('/register-customer', async (req, res) => {
       null,
       null,
       null
-    ]
-    );
+    ]);
 
     res.json({ success: true, message: 'Customer account created successfully' });
   } catch (error) {
@@ -264,10 +277,7 @@ router.post('/login', async (req, res) => {
     const user = users[0];
 
     if (String(user.status || 'active').toLowerCase() !== 'active') {
-      return res.status(403).json({
-        success: false,
-        message: LOCK_MESSAGE
-      });
+      return res.status(403).json({ success: false, message: LOCK_MESSAGE });
     }
 
     const canSell = Number(user.can_sell || 0) === 1;
@@ -306,8 +316,7 @@ router.post('/login', async (req, res) => {
     const { rows: sidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
     const sid = sidResult[0].uuid;
 
-    await pool.query('INSERT INTO auth_sessions (id, user_id, role) VALUES ($1, $2, $3)', [sid, user.id, user.role]
-    );
+    await pool.query('INSERT INTO auth_sessions (id, user_id, role) VALUES ($1, $2, $3)', [sid, user.id, user.role]);
 
     // Generate JWT token
     const token = jwt.sign(
@@ -349,8 +358,7 @@ router.post('/logout', authMiddleware, async (req, res) => {
     const sessionId = req.user?.sid;
 
     if (sessionId) {
-      await pool.query('UPDATE auth_sessions SET logout_at = CURRENT_TIMESTAMP WHERE id = $1 AND user_id = $2 AND logout_at IS NULL', [sessionId, req.user.uid]
-      );
+      await pool.query('UPDATE auth_sessions SET logout_at = CURRENT_TIMESTAMP WHERE id = $1 AND user_id = $2 AND logout_at IS NULL', [sessionId, req.user.uid]);
     }
 
     res.json({ success: true, message: 'Logged out successfully.' });
@@ -360,7 +368,7 @@ router.post('/logout', authMiddleware, async (req, res) => {
   }
 });
 
-// Verify admin password for sensitive access (e.g., farmer dashboards)
+// Verify admin password for sensitive access
 router.post('/verify-admin-password', authMiddleware, async (req, res) => {
   try {
     if (!isAdminLike(req.user?.role)) {
@@ -399,12 +407,12 @@ router.get('/session-stats', authMiddleware, async (req, res) => {
     await ensureAuthSessionsSchema();
 
     const { rows } = await pool.query(`
-  SELECT
-    SUM(CASE WHEN DATE(login_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS today_logins,
-    SUM(CASE WHEN logout_at IS NOT NULL AND DATE(logout_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS today_logouts,
-    SUM(CASE WHEN logout_at IS NULL AND DATE(login_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS currently_logged_in
-  FROM auth_sessions
-`);
+      SELECT
+        SUM(CASE WHEN DATE(login_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS today_logins,
+        SUM(CASE WHEN logout_at IS NOT NULL AND DATE(logout_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS today_logouts,
+        SUM(CASE WHEN logout_at IS NULL AND DATE(login_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS currently_logged_in
+      FROM auth_sessions
+    `);
     const todayStats = rows[0];
 
     res.json({
@@ -413,7 +421,6 @@ router.get('/session-stats', authMiddleware, async (req, res) => {
       todayLogouts: Number(todayStats.today_logouts || 0),
       currentlyLoggedIn: Number(todayStats.currently_logged_in || 0)
     });
-
   } catch (error) {
     console.error('Session stats error:', error);
     res.status(500).json({ success: false, message: 'An unexpected error occurred.' });
@@ -424,8 +431,9 @@ router.get('/session-stats', authMiddleware, async (req, res) => {
 router.get('/me', authMiddleware, async (req, res) => {
   try {
     await ensureUsersStatusSchema();
-    const { rows: users } = await pool.query('SELECT id, full_name, email, role, photo_url, status, contact, farm_size, farm_location, device_serial_number, can_sell, seller_paid_until, created_at FROM users WHERE id = $1', [req.user.uid]
-    );
+    const { rows: users } = await pool.query(`SELECT id, full_name, email, role, photo_url, status, contact, farm_size, 
+      farm_location, device_serial_number, can_sell, seller_paid_until, created_at 
+      FROM users WHERE id = $1`, [req.user.uid]);
 
     if (users.length === 0) {
       return res.status(404).json({ success: false, message: 'User not found' });
