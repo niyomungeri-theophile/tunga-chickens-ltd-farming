@@ -31,16 +31,14 @@ const allowedOrigins = [
 // Middleware
 app.use(cors({
   origin(origin, callback) {
-    if (!origin) {
-      return callback(null, true);
-    }
+    if (!origin) return callback(null, true);
 
-    const isAllowed = allowedOrigins.some((pattern) => pattern.test(origin));
-    if (isAllowed) {
-      return callback(null, true);
-    }
+    const isAllowed = allowedOrigins.some((pattern) =>
+      pattern instanceof RegExp ? pattern.test(origin) : pattern === origin
+    );
 
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    if (isAllowed) return callback(null, true);
+    return callback(null, false); // ← return false instead of throwing an Error
   },
   credentials: true
 }));
