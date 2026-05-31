@@ -190,6 +190,7 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
         voltage,
         current,
       }];
+      console.log("is onolineflag :",isOnlineFlag )
 
 
   // Show only the announcement form (right side, full screen) if requested
@@ -230,6 +231,7 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
           </div>
           <p className="mt-1 text-xs font-bold uppercase tracking-widest text-neon-dark">
             Last push/sample: {latestSampleLabel}
+
           </p>
           {viewingAsAdmin && (
             <p className="mt-2 text-xs font-black uppercase tracking-widest text-neon">

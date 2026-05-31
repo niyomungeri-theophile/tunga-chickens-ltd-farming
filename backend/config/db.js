@@ -1,25 +1,23 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 require('dotenv').config();
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'eco_smart_poultry',
-  port: process.env.DB_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL ||"",
+  ssl: {
+    rejectUnauthorized: false // Required for Neon
+  }
 });
 
 // Test connection
 const testConnection = async () => {
+  let client;
   try {
-    const connection = await pool.getConnection();
-    console.log('✅ MySQL Database connected successfully');
-    connection.release();
+    client = await pool.connect();
+    console.log('✅ PostgreSQL (Neon) Database connected successfully');
   } catch (error) {
-    console.error('❌ MySQL connection error:', error.message);
+    console.error('❌ PostgreSQL connection error:', error.message);
+  } finally {
+    if (client) client.release();
   }
 };
 

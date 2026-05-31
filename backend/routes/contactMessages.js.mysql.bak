@@ -15,10 +15,10 @@ async function ensureContactMessagesTable() {
       email VARCHAR(150) NOT NULL,
       subject VARCHAR(120) NOT NULL,
       message TEXT NOT NULL,
-      status VARCHAR(10) DEFAULT 'unread',
+      status ENUM('unread', 'read') DEFAULT 'unread',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
   tableEnsured = true;
@@ -36,11 +36,13 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, message: 'All fields are required.' });
     }
 
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
 
-    await pool.query(`INSERT INTO contact_messages (id, full_name, email, subject, message, status)
-       VALUES ($1, $2, $3, $4, $5, 'unread')`, [id, fullName, email.trim(), subject.trim(), message.trim()]
+    await pool.query(
+      `INSERT INTO contact_messages (id, full_name, email, subject, message, status)
+       VALUES (?, ?, ?, ?, ?, 'unread')`,
+      [id, fullName, email.trim(), subject.trim(), message.trim()]
     );
 
     return res.json({ success: true, id, message: 'Message sent successfully.' });
@@ -58,7 +60,7 @@ router.get('/', authMiddleware, async (req, res) => {
 
     await ensureContactMessagesTable();
 
-    const { rows: rows } = await pool.query(
+    const [rows] = await pool.query(
       `SELECT id, full_name, email, subject, message, status, created_at
        FROM contact_messages
        ORDER BY created_at DESC`
@@ -81,7 +83,9 @@ router.put('/:id/read', authMiddleware, async (req, res) => {
 
     const { id } = req.params;
 
-    await pool.query(`UPDATE contact_messages SET status = 'read' WHERE id = $1`, [id]
+    await pool.query(
+      `UPDATE contact_messages SET status = 'read' WHERE id = ?`,
+      [id]
     );
 
     return res.json({ success: true, message: 'Message marked as read.' });
@@ -101,7 +105,9 @@ router.delete('/:id', authMiddleware, async (req, res) => {
 
     const { id } = req.params;
 
-    await pool.query(`DELETE FROM contact_messages WHERE id = $1`, [id]
+    await pool.query(
+      `DELETE FROM contact_messages WHERE id = ?`,
+      [id]
     );
 
     return res.json({ success: true, message: 'Message deleted successfully.' });

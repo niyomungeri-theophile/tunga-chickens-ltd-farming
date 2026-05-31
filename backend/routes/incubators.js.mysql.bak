@@ -14,7 +14,7 @@ async function ensureIncubatorsSchema() {
   try {
     await pool.query('ALTER TABLE incubators ADD COLUMN user_id VARCHAR(36) NULL');
   } catch (error) {
-    if (error.code !== '42701') {
+    if (error.code !== 'ER_DUP_FIELDNAME') {
       throw error;
     }
   }
@@ -27,11 +27,11 @@ router.get('/', authMiddleware, async (req, res) => {
     await ensureIncubatorsSchema();
     const admin = isAdminLike(req.user?.role);
     const requestedUserId = admin ? (req.query.userId || null) : req.user.uid;
-    const { rows: incubators } = await pool.query(
-      `SELECT * FROM incubators ${requestedUserId ? 'WHERE user_id = $1' : ''} ORDER BY created_at DESC`,
+    const [incubators] = await pool.query(
+      `SELECT * FROM incubators ${requestedUserId ? 'WHERE user_id = ?' : ''} ORDER BY created_at DESC`,
       requestedUserId ? [requestedUserId] : []
     );
-
+    
     const formattedIncubators = incubators.reduce((acc, inc) => {
       acc[inc.id] = {
         id: inc.physical_id,
@@ -42,7 +42,7 @@ router.get('/', authMiddleware, async (req, res) => {
       };
       return acc;
     }, {});
-
+    
     res.json(formattedIncubators);
   } catch (error) {
     console.error('Get incubators error:', error);
@@ -55,13 +55,15 @@ router.post('/', authMiddleware, async (req, res) => {
   try {
     await ensureIncubatorsSchema();
     const { physicalId, description, location, capacity, status } = req.body;
-
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+    
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
-
-    await pool.query('INSERT INTO incubators (id, user_id, physical_id, description, location, capacity, status) VALUES ($1, $2, $3, $4, $5, $6, $7)', [id, req.user.uid, physicalId, description, location, capacity || 100, status || 'Active']
+    
+    await pool.query(
+      'INSERT INTO incubators (id, user_id, physical_id, description, location, capacity, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, req.user.uid, physicalId, description, location, capacity || 100, status || 'Active']
     );
-
+    
     res.json({ success: true, id, message: 'Incubator added successfully' });
   } catch (error) {
     console.error('Add incubator error:', error);
@@ -73,12 +75,12 @@ router.post('/', authMiddleware, async (req, res) => {
 router.delete('/:id', authMiddleware, async (req, res) => {
   try {
     await ensureIncubatorsSchema();
-    const admin = isAdminLike(req.user?.role); // ✅ Added this line
-    const result = await pool.query(
-      `DELETE FROM incubators WHERE id = $1 ${admin ? '' : 'AND user_id = $2'}`,
+    const admin = isAdminLike(req.user?.role);
+    const [result] = await pool.query(
+      `DELETE FROM incubators WHERE id = ? ${admin ? '' : 'AND user_id = ?'}`,
       admin ? [req.params.id] : [req.params.id, req.user.uid]
     );
-    if (result.rowCount === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Incubator not found' });
     }
     res.json({ success: true, message: 'Incubator deleted successfully' });
@@ -94,11 +96,11 @@ router.put('/:id', authMiddleware, async (req, res) => {
     await ensureIncubatorsSchema();
     const admin = isAdminLike(req.user?.role);
     const { physicalId, description, location, capacity, status } = req.body;
-    const result = await pool.query(
-      `UPDATE incubators SET physical_id = $1, description = $2, location = $3, capacity = $4, status = $5 WHERE id = $6 ${admin ? '' : 'AND user_id = $7'}`,
+    const [result] = await pool.query(
+      `UPDATE incubators SET physical_id = ?, description = ?, location = ?, capacity = ?, status = ? WHERE id = ? ${admin ? '' : 'AND user_id = ?'}`,
       admin ? [physicalId, description, location, capacity, status, req.params.id] : [physicalId, description, location, capacity, status, req.params.id, req.user.uid]
     );
-    if (result.rowCount === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Incubator not found' });
     }
     res.json({ success: true, message: 'Incubator updated successfully' });

@@ -13,7 +13,6 @@ let applicationsSchemaReady = false;
 async function ensureSellerApplicationsSchema() {
   if (applicationsSchemaReady) return;
 
-  // ✅ Only PostgreSQL CREATE TABLE (fixed - removed duplicate MySQL table)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seller_applications (
       id VARCHAR(36) PRIMARY KEY,
@@ -24,16 +23,21 @@ async function ensureSellerApplicationsSchema() {
       farm_size VARCHAR(120) NULL,
       reason TEXT NULL,
       payment_screenshot_url VARCHAR(500) NULL,
-      status VARCHAR(10) DEFAULT 'pending',
+      status ENUM('pending','approved','rejected') DEFAULT 'pending',
       reviewed_by VARCHAR(36) NULL,
       reviewed_at TIMESTAMP NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_seller_applications_status (status),
+      INDEX idx_seller_applications_email (email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
-  
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_seller_applications_status ON seller_applications(status)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_seller_applications_email ON seller_applications(email)');
+
+  try {
+    await pool.query('ALTER TABLE seller_applications ADD COLUMN payment_screenshot_url VARCHAR(500) NULL');
+  } catch (error) {
+    if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+  }
 
   applicationsSchemaReady = true;
 }
@@ -255,23 +259,22 @@ async function sendRejectionEmail({ email, fullName }) {
 
 async function ensureUsersCanSellSchema() {
   try {
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_sell SMALLINT NOT NULL DEFAULT 0");
+    await pool.query("ALTER TABLE users ADD COLUMN can_sell TINYINT(1) NOT NULL DEFAULT 0");
   } catch (error) {
-    if (error.code !== '42701') throw error;
+    if (error.code !== 'ER_DUP_FIELDNAME') throw error;
   }
 
   const extraColumns = [
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp VARCHAR(20) NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_otp_expires_at TIMESTAMP NULL',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_paid_until TIMESTAMP NULL',
+    'ALTER TABLE users ADD COLUMN seller_otp VARCHAR(20) NULL',
+    'ALTER TABLE users ADD COLUMN seller_otp_expires_at TIMESTAMP NULL',
+    'ALTER TABLE users ADD COLUMN seller_paid_until TIMESTAMP NULL'
   ];
 
   for (const statement of extraColumns) {
     try {
       await pool.query(statement);
     } catch (error) {
-      // ✅ Fixed error code for PostgreSQL
-      if (error.code !== '42701') throw error;
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
     }
   }
 }
@@ -297,14 +300,14 @@ router.post('/', uploadPaymentProof.single('paymentScreenshot'), async (req, res
       return res.status(400).json({ success: false, message: 'Full name, email, and contact are required.' });
     }
 
-    // ✅ Fixed: Single uuidResult declaration with gen_random_uuid()
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
 
-    await pool.query(`INSERT INTO seller_applications
+    await pool.query(
+      `INSERT INTO seller_applications
        (id, full_name, email, contact, location, farm_size, reason, payment_screenshot_url, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`, 
-       [id, fullName, email, contact, location || null, farmSize || null, reason || null, paymentScreenshotUrl]
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [id, fullName, email, contact, location || null, farmSize || null, reason || null, paymentScreenshotUrl]
     );
 
     return res.json({ success: true, id, message: 'Application submitted successfully.' });
@@ -328,12 +331,12 @@ router.get('/', authMiddleware, async (req, res) => {
     const status = String(req.query?.status || '').trim().toLowerCase();
     const params = [];
     const where = status && ['pending', 'approved', 'rejected'].includes(status)
-      ? 'WHERE status = $1'
+      ? 'WHERE status = ?'
       : '';
 
     if (where) params.push(status);
 
-    const { rows } = await pool.query(
+    const [rows] = await pool.query(
       `SELECT id, full_name, email, contact, location, farm_size, reason, payment_screenshot_url, status, reviewed_by, reviewed_at, created_at, updated_at
        FROM seller_applications
        ${where}
@@ -358,8 +361,10 @@ router.put('/:id/approve', authMiddleware, async (req, res) => {
     await ensureUsersCanSellSchema();
 
     const { id } = req.params;
-    const { rows: appRows } = await pool.query('SELECT * FROM seller_applications WHERE id = $1 LIMIT 1', [id]);
-    const application = appRows[0];
+    const [[application]] = await pool.query(
+      'SELECT * FROM seller_applications WHERE id = ? LIMIT 1',
+      [id]
+    );
 
     if (!application) {
       return res.status(404).json({ success: false, message: 'Application not found.' });
@@ -371,45 +376,51 @@ router.put('/:id/approve', authMiddleware, async (req, res) => {
 
     const email = String(application.email || '').trim().toLowerCase();
 
-    const { rows: existingUsers } = await pool.query('SELECT id, created_at FROM users WHERE email = $1 LIMIT 1', [email]);
+    const [existingUsers] = await pool.query('SELECT id, created_at FROM users WHERE email = ? LIMIT 1', [email]);
     let created = false;
     let tempPassword = null;
     let userId = existingUsers?.[0]?.id || null;
 
     if (existingUsers.length === 0) {
-      const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+      const [uuidResult] = await pool.query('SELECT UUID() as uuid');
       userId = uuidResult[0].uuid;
       tempPassword = generateTempPassword();
       const hashedPassword = await bcrypt.hash(tempPassword, 10);
       const sellerOtp = generateSellerOtp();
-      
-      await pool.query(`INSERT INTO users (id, full_name, email, password, role, status, photo_url, contact, farm_size, farm_location, device_serial_number, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`, [
-        userId,
-        application.full_name,
-        email,
-        hashedPassword,
-        'customer',
-        'active',
-        null,
-        application.contact,
-        application.farm_size || null,
-        application.location || null,
-        null,
-        1,
-        sellerOtp,
-        null,
-        null
-      ]);
+      await pool.query(
+        `INSERT INTO users (id, full_name, email, password, role, status, photo_url, contact, farm_size, farm_location, device_serial_number, can_sell, seller_otp, seller_otp_expires_at, seller_paid_until)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+        [
+          userId,
+          application.full_name,
+          email,
+          hashedPassword,
+          'customer',
+          'active',
+          null,
+          application.contact,
+          application.farm_size || null,
+          application.location || null,
+          null,
+          1,
+          sellerOtp,
+          null,
+          null
+        ]
+      );
 
-      // ✅ Fixed: Added WHERE clause
-      await pool.query(`UPDATE users
-         SET seller_otp_expires_at = created_at + INTERVAL '30 days',
-             seller_paid_until = created_at + INTERVAL '30 days'
-         WHERE id = $1`, [userId]);
+      await pool.query(
+        `UPDATE users
+         SET seller_otp_expires_at = DATE_ADD(created_at, INTERVAL 30 DAY),
+             seller_paid_until = DATE_ADD(created_at, INTERVAL 30 DAY)
+         WHERE id = ?`,
+        [userId]
+      );
 
-      const { rows: timingRows } = await pool.query('SELECT seller_otp_expires_at, seller_paid_until FROM users WHERE id = $1 LIMIT 1', [userId]);
-      const timing = timingRows[0];
+      const [[timing]] = await pool.query(
+        'SELECT seller_otp_expires_at, seller_paid_until FROM users WHERE id = ? LIMIT 1',
+        [userId]
+      );
 
       created = true;
       application.seller_otp = sellerOtp;
@@ -417,24 +428,32 @@ router.put('/:id/approve', authMiddleware, async (req, res) => {
       application.seller_paid_until = timing?.seller_paid_until || null;
     } else {
       const sellerOtp = generateSellerOtp();
-      // ✅ Fixed: Changed DATE_ADD to PostgreSQL syntax
-      await pool.query(`UPDATE users
+      await pool.query(
+        `UPDATE users
          SET can_sell = 1,
-             seller_otp = $1,
-             seller_otp_expires_at = created_at + INTERVAL '30 days',
-             seller_paid_until = created_at + INTERVAL '30 days'
-         WHERE email = $2`, [sellerOtp, email]);
+             seller_otp = ?,
+             seller_otp_expires_at = DATE_ADD(created_at, INTERVAL 30 DAY),
+             seller_paid_until = DATE_ADD(created_at, INTERVAL 30 DAY)
+         WHERE email = ?`,
+        [sellerOtp, email]
+      );
 
-      const { rows: timingRows2 } = await pool.query('SELECT seller_otp_expires_at, seller_paid_until FROM users WHERE email = $1 LIMIT 1', [email]);
-      const timing = timingRows2[0];
+      const [[timing]] = await pool.query(
+        'SELECT seller_otp_expires_at, seller_paid_until FROM users WHERE email = ? LIMIT 1',
+        [email]
+      );
+
       application.seller_otp = sellerOtp;
       application.seller_otp_expires_at = timing?.seller_otp_expires_at || null;
       application.seller_paid_until = timing?.seller_paid_until || null;
     }
 
-    await pool.query(`UPDATE seller_applications
-       SET status = 'approved', reviewed_by = $1, reviewed_at = CURRENT_TIMESTAMP
-       WHERE id = $2`, [req.user.uid, id]);
+    await pool.query(
+      `UPDATE seller_applications
+       SET status = 'approved', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [req.user.uid, id]
+    );
 
     let mailSent = false;
     let mailError = null;
@@ -486,16 +505,21 @@ router.put('/:id/reject', authMiddleware, async (req, res) => {
     await ensureSellerApplicationsSchema();
 
     const { id } = req.params;
-    const { rows: appRows } = await pool.query('SELECT full_name, email FROM seller_applications WHERE id = $1 LIMIT 1', [id]);
-    const application = appRows[0];
+    const [[application]] = await pool.query(
+      'SELECT full_name, email FROM seller_applications WHERE id = ? LIMIT 1',
+      [id]
+    );
 
     if (!application) {
       return res.status(404).json({ success: false, message: 'Application not found.' });
     }
 
-    await pool.query(`UPDATE seller_applications
-       SET status = 'rejected', reviewed_by = $1, reviewed_at = CURRENT_TIMESTAMP
-       WHERE id = $2`, [req.user.uid, id]);
+    await pool.query(
+      `UPDATE seller_applications
+       SET status = 'rejected', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [req.user.uid, id]
+    );
 
     let mailSent = false;
     let mailError = null;
@@ -533,9 +557,10 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     await ensureSellerApplicationsSchema();
 
     const { id } = req.params;
-    // ✅ Fixed: Changed from double-array destructure to proper rows destructuring
-    const { rows: appRows } = await pool.query('SELECT id, status FROM seller_applications WHERE id = $1 LIMIT 1', [id]);
-    const application = appRows[0];
+    const [[application]] = await pool.query(
+      'SELECT id, status FROM seller_applications WHERE id = ? LIMIT 1',
+      [id]
+    );
 
     if (!application) {
       return res.status(404).json({ success: false, message: 'Application not found.' });
@@ -545,7 +570,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Only rejected applications can be deleted.' });
     }
 
-    await pool.query('DELETE FROM seller_applications WHERE id = $1', [id]);
+    await pool.query('DELETE FROM seller_applications WHERE id = ?', [id]);
 
     return res.json({ success: true, message: 'Rejected application deleted.' });
   } catch (error) {
