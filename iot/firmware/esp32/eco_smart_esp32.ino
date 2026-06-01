@@ -241,13 +241,12 @@ const unsigned long WIFI_WAIT_ALERT_INTERVAL = 900;
 const unsigned long WIFI_WAIT_BEEP_MS = 120;
 
 // ====================== DATABASE & API CONFIG ======================
-const char* BACKEND_URL_TUNNEL = "https://young-lizards-push.loca.lt";
-// Set this to the machine running the backend on your LAN.
-// It must match the subnet the ESP32 is connected to.
+const char* BACKEND_URL_TUNNEL = "https://tunga-chickens-ltd-farming.onrender.com";
+// LAN fallback is disabled for the hosted deployment.
 const IPAddress BACKEND_LAN_TARGET(192, 168, 120, 199);
 const uint16_t BACKEND_LAN_PORT = 5000;
 const bool ENABLE_LAN_FALLBACK = true;
-const char* BACKEND_TUNNEL_HOST = "young-lizards-push.loca.lt";
+const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
 String DEVICE_SERIAL = "";
 String DEVICE_USER_ID = "";
 const char* API_ENDPOINT = "/api/sensors/update-by-serial";
@@ -280,6 +279,28 @@ bool deviceLocked = false;
 unsigned long lastDeviceStatusCheck = 0;
 const unsigned long DEVICE_STATUS_RETRY_INTERVAL = 30000;
 bool lockWarningSent = false;
+
+struct BackendTarget {
+  IPAddress host;
+  uint16_t port;
+};
+
+size_t buildBackendTargets(BackendTarget* targets, size_t maxTargets) {
+  size_t count = 0;
+
+  if (count < maxTargets) {
+    IPAddress gateway = WiFi.gatewayIP();
+    if (gateway != IPAddress(0, 0, 0, 0)) {
+      targets[count++] = { gateway, BACKEND_LAN_PORT };
+    }
+  }
+
+  if (count < maxTargets) {
+    targets[count++] = { BACKEND_LAN_TARGET, BACKEND_LAN_PORT };
+  }
+
+  return count;
+}
 
 void setDeviceOperationalState(bool active) {
   if (active) {
@@ -858,12 +879,8 @@ void requestDeviceSerialFromBackend() {
     }
   }
 
-  const IPAddress targets[] = {
-    BACKEND_LAN_TARGET,
-    WiFi.gatewayIP()
-  };
-  const uint16_t targetPorts[] = { BACKEND_LAN_PORT, BACKEND_LAN_PORT };
-  const size_t targetCount = sizeof(targets) / sizeof(targets[0]);
+  BackendTarget targets[2];
+  const size_t targetCount = buildBackendTargets(targets, 2);
   bool success = false;
 
   if (!ENABLE_LAN_FALLBACK) {
@@ -875,18 +892,18 @@ void requestDeviceSerialFromBackend() {
       break;
     }
     logInfo(String("Local subnet: ") + localIp.toString());
-    logInfo(String("Target subnet: ") + targets[i].toString());
+    logInfo(String("Target subnet: ") + targets[i].host.toString());
 
-    if (!isSameSubnet(localIp, targets[i], subnetMask)) {
+    if (!isSameSubnet(localIp, targets[i].host, subnetMask)) {
       logWarn("Subnet mismatch detected; trying route anyway");
     }
 
-    if (!canConnectToBackend(targets[i], targetPorts[i])) {
+    if (!canConnectToBackend(targets[i].host, targets[i].port)) {
       Serial.println("[WARN] Raw TCP connection failed before HTTP request");
       continue;
     }
 
-    String url = buildBackendUrl(targets[i], targetPorts[i], SERIAL_REQUEST_ENDPOINT);
+    String url = buildBackendUrl(targets[i].host, targets[i].port, SERIAL_REQUEST_ENDPOINT);
     int httpCode = postJsonRequest(url, payload, response);
 
     if (httpCode == 200) {
@@ -950,7 +967,7 @@ void requestDeviceSerialFromBackend() {
 
   if (!success) {
     provisioningComplete = false;
-    Serial.println("[ERROR] Connection failed (tunnel unreachable; LAN fallback unavailable/disabled)");
+    Serial.println("[ERROR] Connection failed (hosted backend and LAN fallback both unreachable)");
     hasRequestedSerialFromBackend = false;
   }
 
@@ -993,20 +1010,17 @@ bool refreshDeviceLockState() {
     return true;
   }
 
-  const IPAddress targets[] = {
-    BACKEND_LAN_TARGET,
-    WiFi.gatewayIP()
-  };
-  const uint16_t targetPorts[] = { BACKEND_LAN_PORT, BACKEND_LAN_PORT };
+  BackendTarget targets[2];
+  const size_t targetCount = buildBackendTargets(targets, 2);
 
-  for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+  for (size_t i = 0; i < targetCount; i++) {
     if (!ENABLE_LAN_FALLBACK) break;
 
-    if (!canConnectToBackend(targets[i], targetPorts[i])) {
+    if (!canConnectToBackend(targets[i].host, targets[i].port)) {
       continue;
     }
 
-    String fullUrl = buildBackendUrl(targets[i], targetPorts[i], DEVICE_STATUS_ENDPOINT);
+    String fullUrl = buildBackendUrl(targets[i].host, targets[i].port, DEVICE_STATUS_ENDPOINT);
     int httpCode = postJsonRequest(fullUrl, payload, response);
     if (httpCode == 200) {
       setDeviceOperationalState(true);
@@ -1472,12 +1486,8 @@ void sendSensorDataToDatabase() {
     return;
   }
 
-  const IPAddress targets[] = {
-    BACKEND_LAN_TARGET,
-    WiFi.gatewayIP()
-  };
-  const uint16_t targetPorts[] = { BACKEND_LAN_PORT, BACKEND_LAN_PORT };
-  const size_t targetCount = sizeof(targets) / sizeof(targets[0]);
+  BackendTarget targets[2];
+  const size_t targetCount = buildBackendTargets(targets, 2);
   bool sent = false;
 
   if (!ENABLE_LAN_FALLBACK) {
@@ -1491,18 +1501,18 @@ void sendSensorDataToDatabase() {
     Serial.print("[NET] Local subnet: ");
     Serial.println(localIp);
     Serial.print("[NET] Target subnet: ");
-    Serial.println(targets[i]);
+    Serial.println(targets[i].host);
 
-    if (!isSameSubnet(localIp, targets[i], subnetMask)) {
+    if (!isSameSubnet(localIp, targets[i].host, subnetMask)) {
       Serial.println("[NET] Subnet mismatch detected; trying route anyway");
     }
 
-    if (!canConnectToBackend(targets[i], targetPorts[i])) {
+    if (!canConnectToBackend(targets[i].host, targets[i].port)) {
       Serial.println("[WARN] Raw TCP connection failed before HTTP request");
       continue;
     }
 
-    String fullUrl = buildBackendUrl(targets[i], targetPorts[i], API_ENDPOINT);
+    String fullUrl = buildBackendUrl(targets[i].host, targets[i].port, API_ENDPOINT);
     int httpResponseCode = postJsonRequest(fullUrl, payload, response);
 
     if (httpResponseCode == 200) {
@@ -1556,7 +1566,7 @@ void sendSensorDataToDatabase() {
     lastDatabaseSendSuccess = false;
     lastDatabaseSendMessage = "All routes failed";
     lastDatabaseSendTimestamp = currentTime;
-    Serial.println("[ERROR] Connection failed (tunnel unreachable; LAN fallback unavailable/disabled)");
+    Serial.println("[ERROR] Connection failed (hosted backend and LAN fallback both unreachable)");
     Serial.print("Failure count: ");
     Serial.println(databaseSendFailCount);
 

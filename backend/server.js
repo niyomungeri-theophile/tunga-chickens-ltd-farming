@@ -80,6 +80,7 @@ const sellerApplicationsRoutes = require('./routes/sellerApplications');
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/devices', devicesRoutes);
+app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 app.use('/api/sensors', sensorsRoutes);
 app.use('/api/transactions', transactionsRoutes);
 app.use('/api/incubators', incubatorsRoutes);

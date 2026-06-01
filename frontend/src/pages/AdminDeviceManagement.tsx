@@ -7,6 +7,8 @@ import {
 import { db } from '../api';
 import { parseApiResponse } from '../utils/parseApiResponse';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+
 interface Device {
   id: number;
   device_serial: string;
@@ -96,15 +98,12 @@ const AdminDeviceManagement: React.FC = () => {
     }
   }, [currentRole, navigate]);
 
-
-  console.log('users serials:', users.map(u => u.deviceSerialNumber));
-  console.log('device serials:', devices.map(d => d.device_serial));
   // Fetch all devices
   const fetchAllDevices = useCallback(async () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('authToken');
-      const response = await fetch(`/api/devices/admin/all`, {
+      const response = await fetch(`${API_BASE_URL}/devices/admin/all`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -130,7 +129,7 @@ const AdminDeviceManagement: React.FC = () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('authToken');
-      const response = await fetch(`/api/devices/admin/unassigned`, {
+      const response = await fetch(`${API_BASE_URL}/devices/admin/unassigned`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -155,7 +154,7 @@ const AdminDeviceManagement: React.FC = () => {
   const fetchAllUsers = useCallback(async () => {
     try {
       const token = localStorage.getItem('authToken');
-      const response = await fetch(`/api/users`, {
+      const response = await fetch(`${API_BASE_URL}/users`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -191,7 +190,7 @@ const AdminDeviceManagement: React.FC = () => {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [fetchAllDevices, fetchUnassignedDevices]);
+  }, [fetchAllDevices, fetchUnassignedDevices, fetchAllUsers]);
 
   // Load saved per-device selected users from localStorage
   useEffect(() => {
@@ -231,7 +230,7 @@ const AdminDeviceManagement: React.FC = () => {
     setAssigningDevice(deviceSerial);
     try {
       const token = localStorage.getItem('authToken');
-      const response = await fetch(`/api/devices/admin/assign`, {
+      const response = await fetch(`${API_BASE_URL}/devices/admin/assign`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -264,7 +263,7 @@ const AdminDeviceManagement: React.FC = () => {
     setAssigningDevice(deviceSerial);
     try {
       const token = localStorage.getItem('authToken');
-      const response = await fetch(`/api/devices/admin/unassign`, {
+      const response = await fetch(`${API_BASE_URL}/devices/admin/unassign`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -365,6 +364,13 @@ const AdminDeviceManagement: React.FC = () => {
     return users.filter(u => !linkedUserIds.has(u.id));
   };
 
+  // Calculate unassigned ESP32s (devices with no user and not linked to any farmer)
+  const trulyUnassignedDevices = unassignedDevices.filter(d => 
+    !users.some(u => 
+      String(u.deviceSerialNumber || '').trim() === String(d.device_serial || '').trim()
+    )
+  );
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -397,13 +403,17 @@ const AdminDeviceManagement: React.FC = () => {
             onClick={() => setActiveTab('all')}
             className={`px-6 py-2 rounded-lg font-medium transition ${activeTab === 'all' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'}`}
           >
-            All Devices ({users.length})
+            All Devices ({filteredFarmerRows.length + trulyUnassignedDevices.filter(d => 
+              d.device_serial.toLowerCase().includes(searchTerm.toLowerCase())
+            ).length})
           </button>
           <button
             onClick={() => setActiveTab('unassigned')}
             className={`px-6 py-2 rounded-lg font-medium transition ${activeTab === 'unassigned' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'}`}
           >
-            Unassigned ({unassignedFarmerRows.length})
+            Unassigned ({unassignedFarmerRows.length + trulyUnassignedDevices.filter(d => 
+              d.device_serial.toLowerCase().includes(searchTerm.toLowerCase())
+            ).length})
           </button>
         </div>
 
@@ -424,83 +434,131 @@ const AdminDeviceManagement: React.FC = () => {
 
         {activeTab === 'all' && !loading && (
           <div className="space-y-4">
-            {filteredFarmerRows.length === 0 ? (
+            {/* Assigned farmers with devices */}
+            {filteredFarmerRows.length === 0 && trulyUnassignedDevices.filter(d => 
+              d.device_serial.toLowerCase().includes(searchTerm.toLowerCase())
+            ).length === 0 ? (
               <div className="bg-white rounded-lg p-8 text-center">
                 <HardDrive className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                <p className="text-gray-700">No farmer accounts found</p>
-                <p className="text-sm text-gray-500 mt-2">Farmer accounts in database: {users.length}</p>
+                <p className="text-gray-700">No devices found</p>
+                <p className="text-sm text-gray-500 mt-2">Farmer accounts: {users.length} | Unassigned ESP32s: {unassignedDevices.length}</p>
               </div>
             ) : (
-              filteredFarmerRows.map((row) => (
-                <div key={row.id} className="bg-white rounded-lg p-6 border border-gray-200 hover:shadow-lg transition">
-                  <div className="grid grid-cols-1 md:grid-cols-5 gap-4 md:gap-2 items-start mb-4">
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Serial Number</p>
-                      <p className="font-mono font-bold text-gray-900 text-lg">{row.serial || 'Not assigned'}</p>
-                      <div className="mt-3">
-                        <button
-                          onClick={() => {
-                            if (!canAssignRow(row)) {
-                              setMessage({ type: 'error', text: 'Chip ID must be detected before assigning a user' });
-                              return;
-                            }
-                            setAssigningSerialCandidate(row.serial);
-                            setAssignModalOpen(true);
-                          }}
-                          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-md shadow-sm hover:bg-blue-100"
-                          disabled={!canAssignRow(row)}
-                        >
-                          <Link2 className="w-4 h-4" />
-                          Assign
-                        </button>
-                        {!row.chipId && (
-                          <p className="mt-2 text-xs text-amber-700">Wait for the device to request a Chip ID first.</p>
-                        )}
+              <>
+                {/* Farmer-linked devices */}
+                {filteredFarmerRows.map((row) => (
+                  <div key={row.id} className="bg-white rounded-lg p-6 border border-gray-200 hover:shadow-lg transition">
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4 md:gap-2 items-start mb-4">
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">Serial Number</p>
+                        <p className="font-mono font-bold text-gray-900 text-lg">{row.serial || 'Not assigned'}</p>
+                        <div className="mt-3">
+                          <button
+                            onClick={() => {
+                              if (!canAssignRow(row)) {
+                                setMessage({ type: 'error', text: 'Chip ID must be detected before assigning a user' });
+                                return;
+                              }
+                              setAssigningSerialCandidate(row.serial);
+                              setAssignModalOpen(true);
+                            }}
+                            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-md shadow-sm hover:bg-blue-100"
+                            disabled={!canAssignRow(row)}
+                          >
+                            <Link2 className="w-4 h-4" />
+                            Assign
+                          </button>
+                          {!row.chipId && (
+                            <p className="mt-2 text-xs text-amber-700">Wait for the device to request a Chip ID first.</p>
+                          )}
+                        </div>
                       </div>
-                    </div>
 
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Status</p>
-                      <div className="mt-2 space-y-2">
-                        {row.isLinked ? (
-                          <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${isDeviceOnline(row.device?.last_seen) ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-800'}`}>
-                            <span className={`w-2 h-2 rounded-full inline-block ${isDeviceOnline(row.device?.last_seen) ? 'bg-emerald-500 animate-pulse' : 'bg-blue-500'}`} />
-                            {isDeviceOnline(row.device?.last_seen) ? 'Online' : 'Linked'}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-2 px-3 py-1 bg-red-50 text-red-700 rounded-full text-sm font-medium">
-                            <span className="w-2 h-2 rounded-full bg-red-400 inline-block" />
-                            Unassigned
-                          </span>
-                        )}
-                        <p className="text-xs text-gray-500">
-                          Last push: {formatTimestamp(row.device?.last_seen)}
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">Status</p>
+                        <div className="mt-2 space-y-2">
+                          {row.isLinked ? (
+                            <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${isDeviceOnline(row.device?.last_seen) ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-800'}`}>
+                              <span className={`w-2 h-2 rounded-full inline-block ${isDeviceOnline(row.device?.last_seen) ? 'bg-emerald-500 animate-pulse' : 'bg-blue-500'}`} />
+                              {isDeviceOnline(row.device?.last_seen) ? 'Online' : 'Linked'}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-2 px-3 py-1 bg-red-50 text-red-700 rounded-full text-sm font-medium">
+                              <span className="w-2 h-2 rounded-full bg-red-400 inline-block" />
+                              Unassigned
+                            </span>
+                          )}
+                          <p className="text-xs text-gray-500">
+                            Last push: {formatTimestamp(row.device?.last_seen)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">First Seen</p>
+                        <p className="text-sm text-gray-700">
+                          {row.device?.linked_at ? new Date(row.device.linked_at).toLocaleDateString('en-GB') : '—'}
                         </p>
                       </div>
-                    </div>
 
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">First Seen</p>
-                      <p className="text-sm text-gray-700">
-                        {row.device?.linked_at ? new Date(row.device.linked_at).toLocaleDateString('en-GB') : '—'}
-                      </p>
-
-                    </div>
-
-
-
-
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Last Seen</p>
-                      <p className="text-sm text-gray-700">{row.device?.last_seen ? formatTimestamp(row.device?.last_seen) : 'no data provided'}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600 mb-1">Linked User</p>
-                      <p className="text-sm text-green-500">{row.fullName ? `${row.fullName} ---> ${row.email}` : 'Not assigned'}</p>
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">Last Seen</p>
+                        <p className="text-sm text-gray-700">{row.device?.last_seen ? formatTimestamp(row.device?.last_seen) : 'no data provided'}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">Linked User</p>
+                        <p className="text-sm text-green-500">{row.fullName ? `${row.fullName} ---> ${row.email}` : 'Not assigned'}</p>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                ))}
+
+                {/* Unassigned ESP32s - BRAND NEW DEVICES */}
+                {trulyUnassignedDevices
+                  .filter(d => d.device_serial.toLowerCase().includes(searchTerm.toLowerCase()))
+                  .map((device) => (
+                    <div key={device.device_serial} className="bg-white rounded-lg p-6 border border-amber-200 hover:shadow-lg transition">
+                      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 md:gap-2 items-start mb-4">
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">Serial Number</p>
+                          <p className="font-mono font-bold text-gray-900 text-lg">{device.device_serial}</p>
+                          <p className="text-xs text-gray-500 mt-1">Chip: {device.esp32_chip_id}</p>
+                          <div className="mt-3">
+                            <button
+                              onClick={() => {
+                                setAssigningSerialCandidate(device.device_serial);
+                                setAssignModalOpen(true);
+                              }}
+                              className="inline-flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-700 rounded-md shadow-sm hover:bg-amber-100"
+                            >
+                              <Link2 className="w-4 h-4" />
+                              Assign to Farmer
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">Status</p>
+                          <span className="inline-flex items-center gap-2 px-3 py-1 bg-amber-50 text-amber-700 rounded-full text-sm font-medium">
+                            <span className="w-2 h-2 rounded-full bg-amber-400 inline-block animate-pulse" />
+                            Awaiting Assignment
+                          </span>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">First Seen</p>
+                          <p className="text-sm text-gray-700">{formatTimestamp(device.first_seen)}</p>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">Last Seen</p>
+                          <p className="text-sm text-gray-700">{formatTimestamp(device.last_seen)}</p>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-600 mb-1">Linked User</p>
+                          <p className="text-sm text-amber-600 font-medium">⚠️ Not yet assigned</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </>
             )}
           </div>
         )}
@@ -542,62 +600,116 @@ const AdminDeviceManagement: React.FC = () => {
 
         {activeTab === 'unassigned' && !loading && (
           <div className="space-y-4">
-            {unassignedFarmerRows.length === 0 ? (
+            {unassignedFarmerRows.length === 0 && trulyUnassignedDevices.filter(d => 
+              d.device_serial.toLowerCase().includes(searchTerm.toLowerCase())
+            ).length === 0 ? (
               <div className="bg-white rounded-lg p-8 text-center">
                 <CheckCircle className="w-12 h-12 text-green-300 mx-auto mb-4" />
-                <p className="text-gray-500">All farmer accounts are assigned!</p>
-                <p className="text-sm text-gray-400 mt-2">Farmer accounts detected: {users.length}</p>
+                <p className="text-gray-500">All devices are assigned!</p>
+                <p className="text-sm text-gray-400 mt-2">Farmer accounts: {users.length} | Total devices: {devices.length + unassignedDevices.length}</p>
               </div>
             ) : (
-              unassignedFarmerRows.map((row) => (
-                <div key={row.id} className="bg-white rounded-lg p-6 border border-gray-200 hover:shadow-lg transition">
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
-                    <div>
-                      <p className="text-sm text-gray-700 mb-1">Serial Number</p>
-                      <p className="font-mono font-bold text-gray-900">{row.serial || 'Not assigned'}</p>
+              <>
+                {/* Farmers with unassigned devices */}
+                {unassignedFarmerRows.map((row) => (
+                  <div key={row.id} className="bg-white rounded-lg p-6 border border-gray-200 hover:shadow-lg transition">
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+                      <div>
+                        <p className="text-sm text-gray-700 mb-1">Serial Number</p>
+                        <p className="font-mono font-bold text-gray-900">{row.serial || 'Not assigned'}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-700 mb-1">Chip ID</p>
+                        <p className="font-mono text-sm text-gray-800">{row.chipId || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-700 mb-1">First Seen</p>
+                        <p className="text-sm text-gray-700">{row.device?.first_seen ? new Date(row.device.first_seen).toLocaleDateString('en-GB') : '—'}</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-sm text-gray-700 mb-1">Chip ID</p>
-                      <p className="font-mono text-sm text-gray-800">{row.chipId || '—'}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-700 mb-1">First Seen</p>
-                      <p className="text-sm text-gray-700">{row.device?.first_seen ? new Date(row.device.first_seen).toLocaleDateString('en-GB') : '—'}</p>
-                    </div>
-                  </div>
 
-                  <div className="p-4 bg-yellow-50 rounded mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Assign to User:</label>
-                    <div className="flex gap-2">
-                      <select
-                        value={selectedUsersMap[row.serial] || ''}
-                        onChange={(e) => setDeviceSelectedUser(row.serial, e.target.value)}
-                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black bg-white"
-                        disabled={!canAssignRow(row)}
-                      >
-                        <option value="" className="text-black" style={{ color: '#000' }}>Select a user...</option>
-                        {getAvailableUsers().map((user) => (
-                          <option key={user.id} value={user.id} className="text-black" style={{ color: '#000' }}>
-                            {user.fullName} ({user.email})
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => handleAssignDevice(row.serial)}
-                        disabled={!canAssignRow(row) || !selectedUsersMap[row.serial] || assigningDevice === row.serial}
-                        className={`px-4 py-2 rounded-md transition flex items-center gap-2 ${!canAssignRow(row) ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed'}`}
-                      >
-                        {assigningDevice === row.serial && <Loader2 className="w-4 h-4 animate-spin" />}
-                        <Link2 className="w-4 h-4" />
-                        Assign
-                      </button>
+                    <div className="p-4 bg-yellow-50 rounded mb-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Assign to User:</label>
+                      <div className="flex gap-2">
+                        <select
+                          value={selectedUsersMap[row.serial] || ''}
+                          onChange={(e) => setDeviceSelectedUser(row.serial, e.target.value)}
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black bg-white"
+                          disabled={!canAssignRow(row)}
+                        >
+                          <option value="" className="text-black" style={{ color: '#000' }}>Select a user...</option>
+                          {getAvailableUsers().map((user) => (
+                            <option key={user.id} value={user.id} className="text-black" style={{ color: '#000' }}>
+                              {user.fullName} ({user.email})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => handleAssignDevice(row.serial)}
+                          disabled={!canAssignRow(row) || !selectedUsersMap[row.serial] || assigningDevice === row.serial}
+                          className={`px-4 py-2 rounded-md transition flex items-center gap-2 ${!canAssignRow(row) ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed'}`}
+                        >
+                          {assigningDevice === row.serial && <Loader2 className="w-4 h-4 animate-spin" />}
+                          <Link2 className="w-4 h-4" />
+                          Assign
+                        </button>
+                      </div>
+                      {!row.chipId && (
+                        <p className="mt-2 text-xs text-amber-700">Chip ID missing, so user selection is locked.</p>
+                      )}
                     </div>
-                    {!row.chipId && (
-                      <p className="mt-2 text-xs text-amber-700">Chip ID missing, so user selection is locked.</p>
-                    )}
                   </div>
-                </div>
-              ))
+                ))}
+
+                {/* Brand new ESP32s that need assignment */}
+                {trulyUnassignedDevices
+                  .filter(d => d.device_serial.toLowerCase().includes(searchTerm.toLowerCase()))
+                  .map((device) => (
+                    <div key={device.device_serial} className="bg-white rounded-lg p-6 border border-amber-200 hover:shadow-lg transition">
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+                        <div>
+                          <p className="text-sm text-gray-700 mb-1">Serial Number</p>
+                          <p className="font-mono font-bold text-amber-700">{device.device_serial}</p>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-700 mb-1">Chip ID</p>
+                          <p className="font-mono text-sm text-gray-800">{device.esp32_chip_id}</p>
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-700 mb-1">First Seen</p>
+                          <p className="text-sm text-gray-700">{formatTimestamp(device.first_seen)}</p>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-amber-50 rounded">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Assign to Farmer:</label>
+                        <div className="flex gap-2">
+                          <select
+                            value={selectedUsersMap[device.device_serial] || ''}
+                            onChange={(e) => setDeviceSelectedUser(device.device_serial, e.target.value)}
+                            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black bg-white"
+                          >
+                            <option value="" className="text-black">Select a farmer...</option>
+                            {getAvailableUsers().map((user) => (
+                              <option key={user.id} value={user.id} className="text-black">
+                                {user.fullName} ({user.email})
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => handleAssignDevice(device.device_serial)}
+                            disabled={!selectedUsersMap[device.device_serial] || assigningDevice === device.device_serial}
+                            className="px-4 py-2 rounded-md transition flex items-center gap-2 bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {assigningDevice === device.device_serial && <Loader2 className="w-4 h-4 animate-spin" />}
+                            <Link2 className="w-4 h-4" />
+                            Assign Device
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </>
             )}
           </div>
         )}
