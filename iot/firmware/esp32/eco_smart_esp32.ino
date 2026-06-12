@@ -305,7 +305,7 @@ const char* BACKEND_URL_TUNNEL = "https://tunga-chickens-ltd-farming.onrender.co
 // LAN fallback is enabled as a backup when the online tunnel is unavailable.
 // Set BACKEND_LAN_TARGET to the actual local backend server IP on your LAN.
 // Do not rely on the WiFi gateway as a fallback target unless the backend is hosted there.
-const IPAddress BACKEND_LAN_TARGET(192, 168, 98, 199);
+const IPAddress BACKEND_LAN_TARGET(192, 168, 156, 199);
 const uint16_t BACKEND_LAN_PORT = 5000;
 const bool ENABLE_LAN_FALLBACK = true;
 const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
@@ -669,12 +669,12 @@ int postJsonRequest(const String& url, const String& payload, String& response) 
     // Keep both client and HTTPClient in same scope for full request duration
     WiFiClientSecure secureClient;
     secureClient.setCACert(RENDER_ROOT_CA);
-    secureClient.setTimeout(30);  // 30 seconds for Render cold-start
-    
+    secureClient.setTimeout(60);  // 60 seconds to survive Render cold-start
+
     HTTPClient http;
     http.setReuse(false);
-    http.setTimeout(30000);  // 30 seconds for Render cold-start
-    http.setConnectTimeout(30000);
+    http.setTimeout(60000);  // 60 seconds to survive Render cold-start
+    http.setConnectTimeout(60000);
     
     if (!http.begin(secureClient, url)) {
       Serial.println("[WARN] HTTP begin failed");
