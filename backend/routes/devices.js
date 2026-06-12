@@ -351,6 +351,42 @@ async function handleRequestSerial(req, res, options = {}) {
       });
     }
 
+    // Check for serials pre-assigned to a farmer but not yet claimed by any ESP32.
+    // This handles the case where admin assigns NT-01 to a new farmer BEFORE the new
+    // ESP32 boots. Without this check the new ESP32 would skip NT-01 and get NT-10+.
+    const [preAssignedRows] = await pool.query(
+      `SELECT dr.id, dr.device_serial, dr.api_key, dr.status, dr.user_id
+       FROM device_registrations dr
+       WHERE dr.user_id IS NOT NULL
+         AND (dr.esp32_chip_id IS NULL OR dr.esp32_chip_id = '')
+         AND dr.status IN ('registered', 'linked')
+       ORDER BY CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(dr.device_serial, '-', 2), '-', -1) AS UNSIGNED) ASC
+       LIMIT 1`
+    );
+
+    if (preAssignedRows.length > 0) {
+      const pre = preAssignedRows[0];
+      let apiKey = String(pre.api_key || '').trim();
+      if (!apiKey) {
+        apiKey = generateApiKey();
+        await pool.query('UPDATE device_registrations SET api_key = ? WHERE id = ?', [apiKey, pre.id]);
+      }
+      await pool.query(
+        `UPDATE device_registrations SET esp32_chip_id = ?, status = 'active', last_seen = NOW() WHERE id = ?`,
+        [esp32ChipId, pre.id]
+      );
+      try { await syncUserDeviceSerial(pre.device_serial, pre.user_id); } catch (_) {}
+      return res.json({
+        success: true,
+        device_serial: pre.device_serial,
+        api_key: apiKey,
+        user_id: pre.user_id,
+        status: 'active',
+        isExisting: true,
+        message: 'Pre-assigned device serial claimed by this ESP32'
+      });
+    }
+
     const [reservedRows] = await pool.query(
       `SELECT id, device_serial, api_key, status
        FROM device_registrations
@@ -920,7 +956,11 @@ router.post('/status', async (req, res) => {
 
     const device = devices[0];
     if (!device.user_id || !device.linked_user_exists) {
-      return res.status(403).json({ success: false, message: 'Device not linked to any account' });
+      return res.status(403).json({
+        success: false,
+        message: 'Device not linked to any account',
+        deviceBlocked: false
+      });
     }
 
     try {

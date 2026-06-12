@@ -13,39 +13,11 @@
 #include <ArduinoJson.h>
 #include <EEPROM.h>
 
-typedef struct BackendTarget BackendTarget;
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <EEPROM.h>
 
-// ====================== PIN DEFINITIONS ======================
-#define PIN_MQ6     32
-#define PIN_MQ137   35
-#define PIN_MG811   34
-#define PIN_LDR     33
-#define PIN_DHT     26
-#define PIN_DS18B20 27
-#define PIN_LDR_DAYNIGHT 14
-#define PIN_BUTTON_START_STOP 25
-#define BUZZER_PIN  5
-#define INDICATOR_PIN 13
-// Buzzer enabled on pin 5 (connected directly, not via relay)
-
-// ====================== RELAYS ======================
-#define SOLAR_RELAY 2
-#define GRID_RELAY  4
-#define HEATER_RELAY    19
-#define EXHAUST_RELAY   18
-// Relay to control supplemental light (active-low on the relay module)
-#define LIGHT_RELAY 15
-// Outside lamp relay (lamp2) - keep LOW at startup
-#define OUTSIDE_LAMP_RELAY 12
-
-// ====================== SIM800L SETUP ======================
-#define GSM_RX 16
-#define GSM_TX 17
-HardwareSerial gsm(2);
-
-// Phone numbers (UPDATE THESE!)
-const char* PHONE_1 = "+250785133511";
-const char* PHONE_2 = "+250725283858";
 static const char* RENDER_ROOT_CA = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -79,6 +51,38 @@ mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
+
+typedef struct BackendTarget BackendTarget;
+
+// ====================== PIN DEFINITIONS ======================
+#define PIN_MQ6     32
+#define PIN_MQ137   35
+#define PIN_MG811   34
+#define PIN_LDR     33
+#define PIN_DHT     26
+#define PIN_DS18B20 27
+#define PIN_LDR_DAYNIGHT 14
+#define PIN_BUTTON_START_STOP 25
+#define BUZZER_PIN  5
+#define INDICATOR_PIN 13
+// Buzzer enabled on pin 5 (connected directly, not via relay)
+
+// ====================== RELAYS ======================
+#define SOLAR_RELAY 2
+#define GRID_RELAY  4
+#define HEATER_RELAY    19
+#define EXHAUST_RELAY   18
+// Relay to control supplemental light (active-low on the relay module)
+#define LIGHT_RELAY 15
+
+// ====================== SIM800L SETUP ======================
+#define GSM_RX 16
+#define GSM_TX 17
+HardwareSerial gsm(2);
+
+// Phone numbers (UPDATE THESE!)
+const char* PHONE_1 = "+250785133511";
+const char* PHONE_2 = "+250725283858";
 
 // ====================== POWER MONITORING ======================
 Adafruit_INA219 ina219;
@@ -220,7 +224,6 @@ CO2Sensor co2Sensor(PIN_MG811, 0.70, 30);
 bool mq6Found = true, mq137Found = true, co2Found = true;
 bool ldrFound = true;
 bool lightRelayActive = false;
-bool outsideLampActive = false;
 bool dayNightFound = true;
 bool isDaytime = true;
 bool bloodingEnabled = false;
@@ -250,7 +253,6 @@ float oxygenPercent = 20.95;
 unsigned long lastMQRead = 0, lastDHTRead = 0, lastPowerRead = 0;
 unsigned long lastSerialPrint = 0, lastDangerCheck = 0;
 unsigned long lastWiFiRetry = 0;
-unsigned long lastStartupHoldLog = 0;
 
 const unsigned long MQ_INTERVAL = 2000;
 const unsigned long DHT_INTERVAL = 3000;
@@ -258,11 +260,9 @@ const unsigned long POWER_INTERVAL = 1500;
 const unsigned long SERIAL_INTERVAL = 5000;
 const unsigned long DANGER_INTERVAL = 1000;
 const unsigned long WIFI_RETRY_INTERVAL = 30000;
-const unsigned long LCD_DISPLAY_HOLD_MS = 2500;
+const unsigned long LCD_DISPLAY_HOLD_MS = 2000;
 
 int displayState = 0;
-unsigned long lastLcdChange = 0;
-bool lcdScreenShown = false;
 bool dangerActive = false;
 unsigned long dangerBeepTime = 0;
 String currentDangerMessage = "";
@@ -302,33 +302,51 @@ const unsigned long WIFI_WAIT_BEEP_MS = 120;
 
 // ====================== DATABASE & API CONFIG ======================
 const char* BACKEND_URL_TUNNEL = "https://tunga-chickens-ltd-farming.onrender.com";
-const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
-// LAN fallback: uses mDNS hostname so the IP is resolved dynamically every time.
-// This means the ESP32 always finds the backend even when DHCP assigns a new IP.
-const char* BACKEND_LAN_HOST = "DESKTOP-DJNRQR0.local";
+// LAN fallback uses the WiFi gateway IP dynamically.
+// When the ESP32 connects to the PC hotspot (Theo-pc / Theo2), the gateway is often the backend server.
+// Add a known LAN backend host as a secondary fallback for networks where the backend is not the gateway.
 const uint16_t BACKEND_LAN_PORT = 5000;
 const bool ENABLE_LAN_FALLBACK = true;
-
-// Resolves the LAN backend hostname via mDNS. Returns 0.0.0.0 if not reachable.
-IPAddress resolveLanHost() {
-  IPAddress resolved(0, 0, 0, 0);
-  if (WiFi.hostByName(BACKEND_LAN_HOST, resolved, 5000)) {
-    Serial.print("[LAN] Resolved "); Serial.print(BACKEND_LAN_HOST);
-    Serial.print(" -> "); Serial.println(resolved.toString());
-    return resolved;
-  }
-  Serial.print("[LAN] mDNS resolution failed for: "); Serial.println(BACKEND_LAN_HOST);
-  return IPAddress(0, 0, 0, 0);
-}
+const char* BACKEND_LAN_HOST = "192.168.156.199";
+const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
 
 size_t buildBackendTargets(BackendTarget* targets, size_t maxTargets) {
   size_t count = 0;
-  if (count < maxTargets) {
-    IPAddress resolved = resolveLanHost();
-    if (resolved != IPAddress(0, 0, 0, 0)) {
-      targets[count++] = { resolved, BACKEND_LAN_PORT };
+  IPAddress gateway = WiFi.gatewayIP();
+  if (count < maxTargets && gateway != IPAddress(0, 0, 0, 0)) {
+    targets[count++] = { gateway, BACKEND_LAN_PORT };
+  }
+
+  if (count < maxTargets && BACKEND_LAN_HOST && strlen(BACKEND_LAN_HOST) > 0) {
+    IPAddress backendIp;
+    if (backendIp.fromString(String(BACKEND_LAN_HOST))) {
+      bool duplicate = false;
+      for (size_t i = 0; i < count; i++) {
+        if (targets[i].host == backendIp && targets[i].port == BACKEND_LAN_PORT) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        targets[count++] = { backendIp, BACKEND_LAN_PORT };
+      }
+    } else {
+      IPAddress resolved;
+      if (WiFi.hostByName(BACKEND_LAN_HOST, resolved) && resolved != IPAddress(0, 0, 0, 0)) {
+        bool duplicate = false;
+        for (size_t i = 0; i < count; i++) {
+          if (targets[i].host == resolved && targets[i].port == BACKEND_LAN_PORT) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) {
+          targets[count++] = { resolved, BACKEND_LAN_PORT };
+        }
+      }
     }
   }
+
   return count;
 }
 
@@ -342,7 +360,7 @@ const char* BROODING_STATUS_ENDPOINT = "/api/devices/brooding/status";
 unsigned long lastDatabaseSend = 0;
 const unsigned long DATABASE_SEND_INTERVAL = 60000;
 int databaseSendFailCount = 0;
-const int MAX_SEND_FAILURES = 3;
+const int MAX_SEND_FAILURES = 10;
 bool hasRequestedSerialFromBackend = false;
 unsigned long lastSerialRequestTime = 0;
 const unsigned long SERIAL_REQUEST_RETRY_INTERVAL = 30000;
@@ -365,7 +383,7 @@ bool deviceLocked = false;
 unsigned long lastDeviceStatusCheck = 0;
 const unsigned long DEVICE_STATUS_RETRY_INTERVAL = 10000;  // Reduced from 30s to 10s for faster lock response
 unsigned long lastDashboardCommandPoll = 0;
-const unsigned long DASHBOARD_COMMAND_POLL_INTERVAL = 5000;  // Reduced from 3s to 5s
+const unsigned long DASHBOARD_COMMAND_POLL_INTERVAL = 30000;  // 30s — avoids overloading Render with back-to-back TLS connections
 bool lockWarningSent = false;
 
 void setDeviceOperationalState(bool active) {
@@ -379,7 +397,9 @@ void setDeviceOperationalState(bool active) {
       deviceAssigned = true;
     }
     Serial.println("[ACTIVE] Backend reports active account - enabling normal device activity");
-  } else {
+  }
+
+   else {
     deviceLocked = true;
     provisioningComplete = false;
     Serial.println("[LOCKED] Backend reports inactive account - disabling normal device activity");
@@ -450,8 +470,6 @@ void setStartupPinDefaults() {
   digitalWrite(LIGHT_RELAY, RELAY_OFF);
   digitalWrite(HEATER_RELAY, RELAY_OFF);
   digitalWrite(EXHAUST_RELAY, RELAY_OFF);
-  // Outside lamp (GPIO12) - keep in NC (RELAY_OFF) at startup
-  digitalWrite(OUTSIDE_LAMP_RELAY, RELAY_OFF);
 }
 
 void persistBroodingToEEPROM(bool enabled, int ageDays) {
@@ -512,9 +530,6 @@ void setInactivePinState() {
   digitalWrite(LIGHT_RELAY, RELAY_OFF);
   digitalWrite(HEATER_RELAY, RELAY_OFF);
   digitalWrite(EXHAUST_RELAY, RELAY_OFF);
-  // Outside lamp to safe state (RELAY_OFF/NC = lamp OFF)
-  digitalWrite(OUTSIDE_LAMP_RELAY, RELAY_OFF);
-  outsideLampActive = false;
 }
 
 void flashWiFiConnectedIndicator() {
@@ -573,7 +588,7 @@ void configureWiFiClient() {
 
 bool canConnectToBackend(const IPAddress& host, uint16_t port) {
   WiFiClient client;
-  client.setTimeout(15000);
+  client.setTimeout(3000);
 
   logInfo(String("Connecting to ") + host.toString() + ":" + String(port));
 
@@ -587,7 +602,7 @@ bool checkServerConnectivityAfterGsm() {
   if (!wifiConnected) return false;
 
   // Try tunnel first (HTTPS endpoint)
-  if (testTcpConnectToHost(BACKEND_TUNNEL_HOST, 443, 3000)) {
+  if (testTcpConnectToHost(BACKEND_TUNNEL_HOST, 443, 10000)) {
     return true;
   }
 
@@ -595,9 +610,9 @@ bool checkServerConnectivityAfterGsm() {
     return false;
   }
 
-  // Then try LAN backend (resolve hostname each time so IP changes are handled).
-  IPAddress lanIp = resolveLanHost();
-  if (lanIp != IPAddress(0, 0, 0, 0) && canConnectToBackend(lanIp, BACKEND_LAN_PORT)) {
+  // Try gateway as LAN backend (works when ESP32 is on the PC hotspot).
+  IPAddress gateway = WiFi.gatewayIP();
+  if (gateway != IPAddress(0, 0, 0, 0) && canConnectToBackend(gateway, BACKEND_LAN_PORT)) {
     return true;
   }
 
@@ -681,13 +696,13 @@ int postJsonRequest(const String& url, const String& payload, String& response) 
   if (secure) {
     // Keep both client and HTTPClient in same scope for full request duration
     WiFiClientSecure secureClient;
-    secureClient.setCACert(RENDER_ROOT_CA);
-    secureClient.setTimeout(60);  // 60 seconds to survive Render cold-start
+    secureClient.setInsecure();
+    secureClient.setTimeout(10);  // seconds (reduced from 20)
 
     HTTPClient http;
     http.setReuse(false);
-    http.setTimeout(60000);  // 60 seconds to survive Render cold-start
-    http.setConnectTimeout(60000);
+    http.setTimeout(8000);        // ms (reduced from 15000)
+    http.setConnectTimeout(10000); // ms (reduced from 20000)
     
     if (!http.begin(secureClient, url)) {
       Serial.println("[WARN] HTTP begin failed");
@@ -736,8 +751,8 @@ int postJsonRequest(const String& url, const String& payload, String& response) 
     WiFiClient client;
     HTTPClient http;
     http.setReuse(false);
-    http.setTimeout(15000);
-    http.setConnectTimeout(15000);
+    http.setTimeout(8000);        // ms (reduced from 60000)
+    http.setConnectTimeout(5000); // ms (reduced from 60000)
     
     if (!http.begin(client, url)) {
       Serial.println("[WARN] HTTP begin failed");
@@ -977,6 +992,32 @@ void persistDeviceSerialIfChanged(const String& receivedSerial) {
   }
 }
 
+void persistApiKeyIfChanged(const String& receivedApiKey) {
+  if (receivedApiKey.length() == 0) {
+    return;
+  }
+
+  if (!deviceApiKeyPersisted || API_KEY != receivedApiKey) {
+    API_KEY = receivedApiKey;
+    storeApiKeyToEEPROM(API_KEY);
+    deviceApiKeyPersisted = true;
+    logInfo("API key synced to backend and persisted");
+  }
+}
+
+void persistUserIdIfChanged(const String& receivedUserId) {
+  if (!isValidAssignedUserId(receivedUserId)) {
+    return;
+  }
+
+  if (!deviceUserIdPersisted || DEVICE_USER_ID != receivedUserId) {
+    DEVICE_USER_ID = receivedUserId;
+    storeUserIdToEEPROM(DEVICE_USER_ID);
+    deviceUserIdPersisted = true;
+    logInfo(String("User ID synced to backend and persisted: ") + DEVICE_USER_ID);
+  }
+}
+
 void clearAndPrepareForNewAssignment(const String& receivedSerial, const String& receivedUserId, const String& receivedApiKey) {
   bool serialChanged = DEVICE_SERIAL != receivedSerial;
   bool userChanged = isValidAssignedUserId(DEVICE_USER_ID) && DEVICE_USER_ID != receivedUserId;
@@ -988,13 +1029,10 @@ void clearAndPrepareForNewAssignment(const String& receivedSerial, const String&
   }
 
   persistDeviceSerialIfChanged(receivedSerial);
-
-  if (receivedApiKey.length() > 0) {
-    API_KEY = receivedApiKey;
-  }
+  persistApiKeyIfChanged(receivedApiKey);
 
   if (isValidAssignedUserId(receivedUserId)) {
-    DEVICE_USER_ID = receivedUserId;
+    persistUserIdIfChanged(receivedUserId);
     deviceAssigned = true;
     provisioningComplete = true;
     needsSerialVerification = false;
@@ -1004,16 +1042,6 @@ void clearAndPrepareForNewAssignment(const String& receivedSerial, const String&
       deviceSerialPersisted = true;
       logInfo("Serial obtained, assigned and persisted");
       shortBeep(1000, 200);
-    }
-
-    if (API_KEY.length() > 0 && !deviceApiKeyPersisted) {
-      storeApiKeyToEEPROM(API_KEY);
-      deviceApiKeyPersisted = true;
-    }
-
-    if (!deviceUserIdPersisted) {
-      storeUserIdToEEPROM(DEVICE_USER_ID);
-      deviceUserIdPersisted = true;
     }
   }
 }
@@ -1035,10 +1063,7 @@ void requestDeviceSerialFromBackend() {
   Serial.println(WiFi.gatewayIP());
   Serial.print("Subnet: ");
   Serial.println(WiFi.subnetMask());
-  uint64_t _mac = ESP.getEfuseMac();
-  char _chipIdBuf[13];
-  snprintf(_chipIdBuf, sizeof(_chipIdBuf), "%04x%08x", (uint16_t)(_mac >> 32), (uint32_t)_mac);
-  String chipId = String(_chipIdBuf);
+  String chipId = String((uint32_t)ESP.getEfuseMac(), HEX);
   Serial.print("Chip ID: ");
   Serial.println(chipId);
 
@@ -1057,7 +1082,7 @@ void requestDeviceSerialFromBackend() {
   String tunnelUrl = String(BACKEND_URL_TUNNEL) + String(SERIAL_REQUEST_ENDPOINT);
 
   if (millis() < tunnelUnavailableUntil) {
-    if (testTcpConnectToHost(BACKEND_TUNNEL_HOST, 443, 3000)) {
+    if (testTcpConnectToHost(BACKEND_TUNNEL_HOST, 443, 10000)) {
       logInfo("Tunnel is reachable again; clearing cooldown and retrying tunnel request");
       tunnelUnavailableUntil = 0;
     }
@@ -1330,7 +1355,12 @@ void applyRemoteBroodingCommand(const String& command) {
     broodingAgeDays = 0;  // reset age explicitly
     tone(BUZZER_PIN, 1500, 100);
     Serial.println("[REMOTE] RESET command applied");
-  } else {
+  }
+    else if (cmd == "SHOW KEY") {
+  Serial.print("API Key: ");
+  Serial.println(API_KEY);
+}
+   else {
     Serial.printf("[REMOTE] Unknown brooding command: %s\n", command.c_str());
   }
 }
@@ -1838,6 +1868,8 @@ void sendSensorDataToDatabase() {
     databaseSendFailCount = 0;
     databaseConnectionAlertSent = false;
     lastDatabaseSend = currentTime;
+    blockUntilDbConnected = false;
+    requireReProvision = false;
     lastDatabaseSendSuccess = true;
     lastDatabaseSendMessage = "Via tunnel: OK";
     lastDatabaseSendTimestamp = currentTime;
@@ -1910,9 +1942,8 @@ void sendSensorDataToDatabase() {
         requireReProvision = true;
         blockUntilDbConnected = true;
       } else if (httpResponseCode == 403) {
-        Serial.println("ERROR: Device account is locked!");
-        Serial.println("Contact admin for support.");
-        // Device locked or unauthorized - stop sending until admin action
+        Serial.println("ERROR: Invalid API key or device locked - re-provisioning required");
+        Serial.println("Type 'CLEAR EEPROM' in serial to force re-provisioning if stuck.");
         provisioningComplete = false;
         deviceAssigned = false;
         needsSerialVerification = true;
@@ -2526,8 +2557,8 @@ void handleAlertSystem() {
   }
 
   auto buildAlertSms = [&]() -> String {
-    String alertMsg = "SYSTEM ERROR DETECTED\n";
-    alertMsg += "STATUS OF ALL SENSORS\n";
+    String alertMsg = "SHOME ERROR DETECTED\n";
+    alertMsg += "STUTA OF ALL SYSTEM STATAS\n";
     alertMsg += "Temp: " + String((ds18b20Found && temperatureDS18B20 != 0) ? temperatureDS18B20 : temperatureDHT, 1) + "C\n";
     alertMsg += "Humidity: " + String(humidity, 0) + "%\n";
     alertMsg += "Light: " + String(lightPercent, 0) + "%\n";
@@ -2584,7 +2615,6 @@ void initPowerSystem() {
   pinMode(LIGHT_RELAY, OUTPUT);
   pinMode(HEATER_RELAY, OUTPUT);
   pinMode(EXHAUST_RELAY, OUTPUT);
-  pinMode(OUTSIDE_LAMP_RELAY, OUTPUT);
   
   setStartupPinDefaults();
   solarRelayActive = false;
@@ -2947,44 +2977,6 @@ void controlLightRelay() {
   }
 
   // No other state change needed.
-}
-
-// Control outside lamp relay (lamp2) on OUTSIDE_LAMP_RELAY (GPIO12)
-// Active-low relay: RELAY_ON (LOW) energizes coil, switches NO (lamp ON)
-//                   RELAY_OFF (HIGH) keeps relay in NC (lamp OFF)
-// Rule: activate at NIGHT (RELAY_ON/NO), deactivate during DAY (RELAY_OFF/NC)
-void controlOutsideLampRelay() {
-  if (deviceLocked) {
-    digitalWrite(OUTSIDE_LAMP_RELAY, RELAY_OFF);
-    outsideLampActive = false;
-    return;
-  }
-
-  if (!dayNightFound) {
-    digitalWrite(OUTSIDE_LAMP_RELAY, RELAY_OFF);
-    outsideLampActive = false;
-    return;
-  }
-
-  // At night, activate the outside lamp (RELAY_ON/NO)
-  if (!isDaytime) {
-    if (!outsideLampActive) {
-      Serial.println("[OUTSIDE_LAMP] Night detected - activating outside lamp relay (RELAY_ON/NO)");
-      digitalWrite(OUTSIDE_LAMP_RELAY, RELAY_ON);
-      outsideLampActive = true;
-    }
-    return;
-  }
-
-  // During day, deactivate the outside lamp (RELAY_OFF/NC)
-  if (isDaytime) {
-    if (outsideLampActive) {
-      Serial.println("[OUTSIDE_LAMP] Day detected - deactivating outside lamp relay (RELAY_OFF/NC)");
-      digitalWrite(OUTSIDE_LAMP_RELAY, RELAY_OFF);
-      outsideLampActive = false;
-    }
-    return;
-  }
 }
 
 void readDHT22() {
@@ -3405,7 +3397,7 @@ void displayLockedStatus() {
   lcd.setCursor(0,0); lcd.print("Dear farmer");
   lcd.setCursor(0,1); lcd.print("YOUR SYSTEM LOCKED!!");
   lcd.setCursor(0,2); lcd.print("Contact TCL Team");
-  lcd.setCursor(0,3); lcd.print("For immediate call");
+  lcd.setCursor(0,3); lcd.print("For imadiatly call");
   delay(1500);
 }
 
@@ -3417,7 +3409,7 @@ void notifyBeforeLocking(const String& reason) {
   lockWarningSent = true;
 
   String alertMsg = "Dear farmer, your system is locked !!\n";
-  alertMsg += "Contact TCL Team for immediate call Eng Theophile\n";
+  alertMsg += "Contact TCL Team for imadiatly call Eng Theophile\n";
   alertMsg += "+250785133511 & 0725283858\n";
   alertMsg += "Reason: " + reason + "\n";
   alertMsg += "Device: " + String(DEVICE_SERIAL);
@@ -3500,6 +3492,11 @@ void setup() {
     Serial.print("✓ Loaded API key from EEPROM: ");
     Serial.println(API_KEY.substring(0, min((int)API_KEY.length(), 8)) + "...");
   }
+
+    else {
+    deviceApiKeyPersisted = false;
+    Serial.println("no api key");
+  }
   
   // Configure MQ-6 for LPG detection
   MQ6.setRegressionMethod(1);
@@ -3552,6 +3549,26 @@ void setup() {
   delay(2000);
   systemReadyBeep();
   connectToWiFi();
+  if (wifiConnected) {
+  Serial.println("[NTP] Syncing time with NTP server...");
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  
+  struct tm timeinfo;
+  int ntpRetries = 0;
+  while (!getLocalTime(&timeinfo) && ntpRetries < 20) {
+    Serial.print(".");
+    delay(500);
+    ntpRetries++;
+  }
+  
+  if (getLocalTime(&timeinfo)) {
+    Serial.printf("\n[NTP] Time synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+      timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  } else {
+    Serial.println("\n[NTP] Time sync failed - TLS may still fail");
+  }
+}
 
   if (wifiConnected && DEVICE_SERIAL != "UNREGISTERED" && DEVICE_SERIAL.length() > 0) {
     delay(1000);
@@ -3616,16 +3633,31 @@ void loop() {
       Serial.print("[DEBUG] Current: "); Serial.println(debugMode ? "ON" : "OFF");
     } else if (cmd == "REQUEST SERIAL" || cmd == "REQUEST_SERIAL" || cmd == "FORCE SERIAL") {
       Serial.println("[CMD] Forcing serial request to backend...");
-      uint64_t _mac = ESP.getEfuseMac();
-      char _chipIdBuf[13];
-      snprintf(_chipIdBuf, sizeof(_chipIdBuf), "%04x%08x", (uint16_t)(_mac >> 32), (uint32_t)_mac);
-      String chipId = String(_chipIdBuf);
+      String chipId = String((uint32_t)ESP.getEfuseMac(), HEX);
       Serial.print("Chip ID: "); Serial.println(chipId);
       requestDeviceSerialFromBackend();
+    } else if (cmd == "SHOW CREDENTIALS" || cmd == "SHOW_CREDS" || cmd == "CREDENTIALS") {
+      Serial.println("[CREDENTIALS] Current device provisioning state:");
+      Serial.print("  DEVICE_SERIAL: "); Serial.println(DEVICE_SERIAL);
+      Serial.print("  API_KEY: "); Serial.println(API_KEY.length() ? API_KEY : "<empty>");
+      Serial.print("  deviceAssigned: "); Serial.println(deviceAssigned ? "true" : "false");
+      Serial.print("  provisioningComplete: "); Serial.println(provisioningComplete ? "true" : "false");
+      Serial.print("  requireReProvision: "); Serial.println(requireReProvision ? "true" : "false");
+      Serial.print("  blockUntilDbConnected: "); Serial.println(blockUntilDbConnected ? "true" : "false");
+      Serial.print("  lastDatabaseSendTimestamp: "); Serial.println(lastDatabaseSendTimestamp);
     } else if (cmd == "WIFI RESET" || cmd == "WIFI_RETRY" || cmd == "WIFI CONNECT") {
       Serial.println("[CMD] Manual WiFi reconnect requested...");
       resetWiFiReconnectLock();
       connectToWiFi();
+    } else if (cmd == "CLEAR EEPROM" || cmd == "CLEAR_EEPROM" || cmd == "REPROVISION") {
+      Serial.println("[CMD] Clearing EEPROM provisioning data — device will re-provision on next backend contact");
+      clearProvisioningEEPROM();
+      storeFirmwareSignatureToEEPROM(FIRMWARE_EEPROM_SIGNATURE);
+      requireReProvision = false;
+      blockUntilDbConnected = false;
+      hasRequestedSerialFromBackend = false;
+      lastSerialRequestTime = 0;
+      Serial.println("[CMD] EEPROM cleared. Type 'REQUEST SERIAL' to re-provision immediately.");
     }
   }
   
@@ -3698,15 +3730,26 @@ void loop() {
     return;
   }
 
-  // If we've entered blocking mode due to repeated DB failures, keep retrying sends and avoid other actions
+  // If DB is unreachable, keep retrying but still run physical controls and button so the
+  // farm does not become unresponsive. Only skip the normal display cycle.
   if (blockUntilDbConnected) {
+    readStartButton();
+    readDS18B20();
+    readDayNightLDR();
+    readLDR();
+    readDHT22();
+    controlLightRelay();
+    readPowerData();
+    if (!deviceLocked) controlPowerRelays();
+    checkDangerConditions();
+    updateIndicatorLED();
     if (millis() - lastDbReconnectAttempt >= dbReconnectBackoffMs) {
-      Serial.println("[BLOCK] Attempting reconnection to DB (blocking mode)...");
+      Serial.println("[BLOCK] Attempting reconnection to DB...");
       sendSensorDataToDatabase();
       lastDbReconnectAttempt = millis();
     }
     displayDatabaseStatus();
-    delay(2000);
+    delay(500);
     return;
   }
 
@@ -3788,7 +3831,6 @@ void loop() {
   readDayNightLDR();
   readLDR();
   controlLightRelay();
-  controlOutsideLampRelay();
   startupSensorPhaseComplete = true;
   
   if (currentMillis - lastPowerRead >= POWER_INTERVAL) {
@@ -3826,12 +3868,10 @@ void loop() {
       Serial.println("[STARTUP] Controller outputs armed by fallback timeout");
     } else {
       unsigned long remaining = STARTUP_ARM_TIMEOUT_MS - sinceBoot;
-      if (currentMillis - lastStartupHoldLog >= 500) {
-        Serial.print("[STARTUP] Holding outputs at startup defaults until provisioning completes. Timeout in ms: ");
-        Serial.println(remaining);
-        lastStartupHoldLog = currentMillis;
-      }
-      // Do not delay here; allow the loop to continue updating status and LCD
+      Serial.print("[STARTUP] Holding outputs at startup defaults until provisioning completes. Timeout in ms: ");
+      Serial.println(remaining);
+      delay(500);
+      return;
     }
   }
 
@@ -3847,8 +3887,8 @@ void loop() {
   }
   
   if (isCallActive) {
-    // Call status updates frequently but non-blocking
     displayCallStatus();
+    delay(500);
   } else if (!wifiConnected) {
     displayWiFiStatus();
   } else if (deviceLocked) {
@@ -3856,77 +3896,48 @@ void loop() {
   } else if (!provisioningComplete) {
     displayAssignmentPendingStatus();
   } else {
-    // Non-blocking LCD state machine: show a screen once, wait LCD_DISPLAY_HOLD_MS, then advance
-    unsigned long now = currentMillis;
-
+    // Always show BLOODING SYSTEM status first (with 2.5s hold)
     if (displayState == 0) {
-      if (!lcdScreenShown) {
-        displayBloodingSystemStatus();
-        lcdScreenShown = true;
-        lastLcdChange = now;
-      } else if (now - lastLcdChange >= LCD_DISPLAY_HOLD_MS) {
-        lcdScreenShown = false;
-        if (bloodingEnabled) {
-          displayState = 1; // advance to next screen
-        }
+      displayBloodingSystemStatus();
+      delay(LCD_DISPLAY_HOLD_MS);  // Hold BLOODING SYSTEM screen for 2.5s
+      
+      // Only advance to other screens (a-e) if blooding is STARTED
+      if (bloodingEnabled) {
+        displayState = 1;  // Advance to Air Quality
       }
+      // If blooding is STOPPED, stay at state 0 and loop back to BLOODING SYSTEM
     } else if (bloodingEnabled) {
-      switch (displayState) {
-        case 1:
-          if (!lcdScreenShown) {
-            displayAirQualityData();
-            lcdScreenShown = true;
-            lastLcdChange = now;
-          } else if (now - lastLcdChange >= LCD_DISPLAY_HOLD_MS) {
-            lcdScreenShown = false;
-            displayState = 2;
-          }
+      // Only show these screens (a-e) when blooding is ACTIVE
+      switch(displayState) {
+        case 1:  // (a) Air Quality Data
+          displayAirQualityData();
+          delay(LCD_DISPLAY_HOLD_MS);
+          displayState = 2;
           break;
-        case 2:
-          if (!lcdScreenShown) {
-            displayEnvironmentalData();
-            lcdScreenShown = true;
-            lastLcdChange = now;
-          } else if (now - lastLcdChange >= LCD_DISPLAY_HOLD_MS) {
-            lcdScreenShown = false;
-            displayState = 3;
-          }
+        case 2:  // (b) Environmental Data
+          displayEnvironmentalData();
+          delay(LCD_DISPLAY_HOLD_MS);
+          displayState = 3;
           break;
-        case 3:
-          if (!lcdScreenShown) {
-            displayPowerData();
-            lcdScreenShown = true;
-            lastLcdChange = now;
-          } else if (now - lastLcdChange >= LCD_DISPLAY_HOLD_MS) {
-            lcdScreenShown = false;
-            displayState = 4;
-          }
+        case 3:  // (c) Power Data
+          displayPowerData();
+          delay(LCD_DISPLAY_HOLD_MS);
+          displayState = 4;
           break;
-        case 4:
-          if (!lcdScreenShown) {
-            displaySystemErrors();
-            lcdScreenShown = true;
-            lastLcdChange = now;
-          } else if (now - lastLcdChange >= LCD_DISPLAY_HOLD_MS) {
-            lcdScreenShown = false;
-            displayState = 5;
-          }
+        case 4:  // (d) System Errors
+          displaySystemErrors();
+          delay(LCD_DISPLAY_HOLD_MS);
+          displayState = 5;
           break;
-        case 5:
-          if (!lcdScreenShown) {
-            displayDatabaseStatus();
-            lcdScreenShown = true;
-            lastLcdChange = now;
-          } else if (now - lastLcdChange >= LCD_DISPLAY_HOLD_MS) {
-            lcdScreenShown = false;
-            displayState = 0;
-          }
+        case 5:  // (e) Database Status
+          displayDatabaseStatus();
+          delay(LCD_DISPLAY_HOLD_MS);
+          displayState = 0;  // Return to BLOODING SYSTEM screen (loop back)
           break;
       }
     } else {
       // If blooding was stopped while cycling, immediately return to state 0
       displayState = 0;
-      lcdScreenShown = false;
     }
   }
   
