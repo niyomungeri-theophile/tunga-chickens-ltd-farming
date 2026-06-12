@@ -98,7 +98,8 @@ function mapPostgresError(error) {
     '23505': 'ER_DUP_ENTRY',
     '23503': 'ER_NO_REFERENCED_ROW_2',
     '42701': 'ER_DUP_FIELDNAME',
-    '42P07': 'ER_TABLE_EXISTS_ERROR',
+    // 42P07 is duplicate_table/relation exists — treat as duplicate key/index to match MySQL checks
+    '42P07': 'ER_DUP_KEYNAME',
     '42710': 'ER_DUP_KEYNAME',
     '42P01': 'ER_NO_SUCH_TABLE',
     '42703': 'ER_BAD_FIELD_ERROR'
