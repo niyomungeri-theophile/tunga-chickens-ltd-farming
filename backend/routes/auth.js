@@ -47,16 +47,9 @@ async function ensureUsersStatusSchema() {
 
   // Speed up serialNumber -> user lookup (used by ESP32 update-by-serial).
   // Note: we avoid UNIQUE here to not break existing DBs with duplicates.
-  const [indexRows] = await pool.query(`
-    SELECT 1
-    FROM information_schema.statistics
-    WHERE table_schema = DATABASE()
-      AND table_name = 'users'
-      AND index_name = 'idx_users_device_serial_number'
-    LIMIT 1
-  `);
-
-  if (!indexRows.length) {
+  if (pool.isPostgres) {
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_device_serial_number ON users(device_serial_number)');
+  } else {
     await pool.query('CREATE INDEX idx_users_device_serial_number ON users(device_serial_number)');
   }
 
