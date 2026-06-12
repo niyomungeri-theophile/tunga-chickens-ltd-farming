@@ -5,7 +5,7 @@ import { HashRouter as Router, Routes, Route, Link, useLocation, useNavigate, Na
 import { 
   Menu, X, Activity, Wallet, LogOut,
   BrainCircuit, Droplets, Sun, Moon, Loader2, LayoutDashboard, ClipboardList, ImagePlus, FileSignature, Users, Store,
-  HardDrive
+  HardDrive, ArrowLeft
 } from 'lucide-react';
 import { auth, db } from './api';
 import { LanguageProvider, useTranslation } from './contexts/LanguageContext';
@@ -411,6 +411,18 @@ const AppContent: React.FC = () => {
     navigate('/login', { replace: true });
   };
 
+  const defaultBackRoute = user && !isPublicRole
+    ? (isMarketplace ? '/customer-dashboard' : isAdminLike ? (isSupervisor ? '/supervisor-dashboard' : '/users') : '/farmer-dashboard')
+    : '/';
+
+  const handleBack = () => {
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate(defaultBackRoute, { replace: true });
+    }
+  };
+
   useEffect(() => {
     const timer = setTimeout(() => {
       if (loading) setLoading(false);
@@ -476,6 +488,17 @@ const AppContent: React.FC = () => {
 
       {user && !isPublicRole && <Sidebar user={user} userData={userData} isOpen={isSidebarOpen} toggle={() => setIsSidebarOpen(!isSidebarOpen)} />}
       <div className={`${user && !isPublicRole ? 'md:ml-72 pt-20 md:pt-0' : 'pt-20'} transition-all duration-500 min-h-screen relative`}>
+        {location.pathname !== '/' && (
+          <div className="fixed top-20 left-6 z-40 md:left-[calc(18rem+1.5rem)]">
+            <button
+              onClick={handleBack}
+              className="inline-flex items-center gap-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 border border-slate-200 dark:border-white/10 shadow-lg px-4 py-2 text-sm font-semibold text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+            >
+              <ArrowLeft size={16} />
+              {t('back')}
+            </button>
+          </div>
+        )}
         <Routes>
           <Route
             path="/"

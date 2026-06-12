@@ -329,8 +329,14 @@ const AdminDeviceManagement: React.FC = () => {
   });
 
   const farmerDeviceRows = users.map((user) => {
-    const serial = String(user.deviceSerialNumber || '').trim();
-    const device = devices.find((item) => String(item.device_serial || '').trim() === serial);
+    const serialFromUser = String(user.deviceSerialNumber || '').trim();
+    let device = devices.find((item) => String(item.device_serial || '').trim() === serialFromUser);
+
+    if (!device) {
+      device = devices.find((item) => String(item.user_id || '').trim() === String(user.id).trim());
+    }
+
+    const serial = String(device?.device_serial || serialFromUser || '').trim();
     const isLinked = Boolean(device?.user_id || device?.full_name || device?.status === 'linked');
 
     return {
@@ -342,12 +348,14 @@ const AdminDeviceManagement: React.FC = () => {
     };
   });
 
-  const filteredFarmerRows = farmerDeviceRows.filter((row) => {
+  const deviceAwareFarmerRows = farmerDeviceRows.filter((row) => Boolean(row.serial || row.chipId || row.isLinked));
+
+  const filteredFarmerRows = deviceAwareFarmerRows.filter((row) => {
     const haystack = [row.fullName, row.email, row.serial, row.chipId].join(' ').toLowerCase();
     return haystack.includes(searchTerm.toLowerCase());
   });
 
-  const unassignedFarmerRows = farmerDeviceRows.filter((row) => !row.isLinked).filter((row) => {
+  const unassignedFarmerRows = deviceAwareFarmerRows.filter((row) => !row.isLinked).filter((row) => {
     const haystack = [row.fullName, row.email, row.serial, row.chipId].join(' ').toLowerCase();
     return haystack.includes(searchTerm.toLowerCase());
   });
@@ -448,30 +456,15 @@ const AdminDeviceManagement: React.FC = () => {
                 {/* Farmer-linked devices */}
                 {filteredFarmerRows.map((row) => (
                   <div key={row.id} className="bg-white rounded-lg p-6 border border-gray-200 hover:shadow-lg transition">
-                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4 md:gap-2 items-start mb-4">
+                    <div className="grid grid-cols-1 md:grid-cols-6 gap-4 md:gap-2 items-start mb-4">
                       <div>
                         <p className="text-sm text-gray-600 mb-1">Serial Number</p>
                         <p className="font-mono font-bold text-gray-900 text-lg">{row.serial || 'Not assigned'}</p>
-                        <div className="mt-3">
-                          <button
-                            onClick={() => {
-                              if (!canAssignRow(row)) {
-                                setMessage({ type: 'error', text: 'Chip ID must be detected before assigning a user' });
-                                return;
-                              }
-                              setAssigningSerialCandidate(row.serial);
-                              setAssignModalOpen(true);
-                            }}
-                            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-md shadow-sm hover:bg-blue-100"
-                            disabled={!canAssignRow(row)}
-                          >
-                            <Link2 className="w-4 h-4" />
-                            Assign
-                          </button>
-                          {!row.chipId && (
-                            <p className="mt-2 text-xs text-amber-700">Wait for the device to request a Chip ID first.</p>
-                          )}
-                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">Chip ID</p>
+                        <p className="font-mono text-sm text-gray-900">{row.chipId || '—'}</p>
                       </div>
 
                       <div>

@@ -4,7 +4,6 @@ const pool = require('../config/db');
 const { authMiddleware } = require('./auth');
 const fs = require('fs');
 const path = require('path');
-const cloudinary = require('cloudinary').v2;
 
 /**
  * For any base64 data-URL (image or video), decode to disk and return
@@ -12,44 +11,45 @@ const cloudinary = require('cloudinary').v2;
  * For plain external URLs (http/https/already a path) return unchanged.
  * This keeps MySQL free of large binary data entirely.
  */
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-async function saveMediaToCloud(id, mediaType, mediaDataUrl) {
-  // Already an external URL — store as-is
+function saveMediaToDisk(id, mediaType, mediaDataUrl) {
+  // External URL or already a server path → store as-is
   if (!mediaDataUrl.startsWith('data:')) return mediaDataUrl;
 
-  const resourceType = mediaType === 'video' ? 'video' : 'image';
+  const match = mediaDataUrl.match(/^data:([^;]+);base64,([\s\S]+)$/);
+  if (!match) return mediaDataUrl;
 
-  const result = await cloudinary.uploader.upload(mediaDataUrl, {
-    public_id: `hero_media/${id}`,
-    resource_type: resourceType,
-    overwrite: true,
-  });
+  const mime = match[1]; // e.g. 'image/jpeg' or 'video/mp4'
+  const ext = (mime.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const folder = mediaType === 'video' ? 'videos' : 'images';
+  const filename = `${id}.${ext}`;
 
-  return result.secure_url;
+  const targetDir = path.join(__dirname, '..', 'uploads', folder);
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+
+  fs.writeFileSync(path.join(targetDir, filename), Buffer.from(match[2], 'base64'));
+  return `/uploads/${folder}/${filename}`;
 }
+
 let tableEnsured = false;
 
 async function ensureHeroMediaTable() {
   if (tableEnsured) return;
 
- await pool.query(`
-  CREATE TABLE IF NOT EXISTS hero_media (
-    id VARCHAR(36) PRIMARY KEY,
-    title VARCHAR(200) NOT NULL,
-    description TEXT NOT NULL,
-    media_type VARCHAR(10) NOT NULL DEFAULT 'image',
-    media_data_url TEXT NOT NULL,
-    display_order INT NOT NULL DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS hero_media (
+      id VARCHAR(36) PRIMARY KEY,
+      title VARCHAR(200) NOT NULL,
+      description TEXT NOT NULL,
+      media_type ENUM('image', 'video') NOT NULL DEFAULT 'image',
+      media_data_url LONGTEXT NOT NULL,
+      display_order INT NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
   tableEnsured = true;
 }
 
@@ -57,7 +57,7 @@ router.get('/', async (req, res) => {
   try {
     await ensureHeroMediaTable();
 
-    const { rows: rows } = await pool.query(
+    const [rows] = await pool.query(
       `SELECT id, title, description, media_type, media_data_url, display_order, created_at
        FROM hero_media
        ORDER BY display_order ASC, created_at DESC`
@@ -84,15 +84,17 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid media type.' });
     }
 
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
 
     // For any base64 data-URL, write to disk instead of MySQL (avoids max_allowed_packet)
     // For external http/https URLs, stored directly as-is
-    const storageUrl = await saveMediaToCloud(id, mediaType, mediaDataUrl);
+    const storageUrl = saveMediaToDisk(id, mediaType, mediaDataUrl);
 
-    await pool.query(`INSERT INTO hero_media (id, title, description, media_type, media_data_url, display_order)
-       VALUES ($1, $2, $3, $4, $5, $6)`, [id, String(title).trim(), String(description).trim(), mediaType, storageUrl, Number(displayOrder) || 1]
+    await pool.query(
+      `INSERT INTO hero_media (id, title, description, media_type, media_data_url, display_order)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, String(title).trim(), String(description).trim(), mediaType, storageUrl, Number(displayOrder) || 1]
     );
 
     return res.json({ success: true, id, message: 'Hero media saved successfully.' });
@@ -115,7 +117,9 @@ router.put('/:id/order', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { displayOrder } = req.body || {};
 
-    await pool.query(`UPDATE hero_media SET display_order = $1 WHERE id = $2`, [Number(displayOrder) || 1, id]
+    await pool.query(
+      `UPDATE hero_media SET display_order = ? WHERE id = ?`,
+      [Number(displayOrder) || 1, id]
     );
 
     return res.json({ success: true, message: 'Hero media order updated.' });
@@ -132,21 +136,21 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
 
     // Fetch stored URL so we can clean up any on-disk video file
-    const { rows: existing } = await pool.query('SELECT media_data_url FROM hero_media WHERE id = $1', [id]
+    const [existing] = await pool.query(
+      'SELECT media_data_url FROM hero_media WHERE id = ?', [id]
     );
     const storedUrl = existing[0]?.media_data_url || '';
 
-    await pool.query(`DELETE FROM hero_media WHERE id = $1`, [id]
+    await pool.query(
+      `DELETE FROM hero_media WHERE id = ?`,
+      [id]
     );
 
     // Remove disk file if it was saved there
-   if (storedUrl.includes('cloudinary.com')) {
-  try {
-    const publicId = `hero_media/${id}`;
-    await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
-  } catch (_) {}
-}
-
+    if (storedUrl.startsWith('/uploads/')) {
+      const diskPath = path.join(__dirname, '..', storedUrl);
+      try { fs.unlinkSync(diskPath); } catch (_) { /* already gone */ }
+    }
 
     return res.json({ success: true, message: 'Hero media deleted successfully.' });
   } catch (error) {

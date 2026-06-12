@@ -2,6 +2,7 @@ const express = require('express');
 const { spawn } = require('child_process');
 const path = require('path');
 const { authMiddleware } = require('./auth');
+const { pruneTableToLatestRows } = require('../lib/pruneRows');
 
 const router = express.Router();
 
@@ -56,12 +57,13 @@ function isAdminLike(role) {
 function buildWhereClause(userId) {
   if (userId) {
     return {
-      clause: 'WHERE user_id = $1 AND recorded_at BETWEEN $2 AND $3',
+      clause: 'WHERE user_id = ? AND recorded_at BETWEEN ? AND ?',
       params: [userId],
     };
   }
+
   return {
-    clause: 'WHERE recorded_at BETWEEN $1 AND $2',
+    clause: 'WHERE recorded_at BETWEEN ? AND ?',
     params: [],
   };
 }
@@ -111,7 +113,7 @@ function runPythonPrediction(payload) {
   const preferredCmd = process.env.PYTHON_BIN || 'python';
   return runOnce(preferredCmd, [scriptPath])
     .catch((err) => {
-      // Windows often has "py" launcher but no "python" shim.
+      // Windows often has `py` launcher but no `python` shim.
       if (err && err.code === 'ENOENT' && preferredCmd === 'python') {
         return runOnce('py', ['-3', scriptPath]);
       }
@@ -137,7 +139,8 @@ router.post('/predict', authMiddleware, async (req, res) => {
       }
 
       const { clause, params } = buildWhereClause(requestedUserId);
-      const { rows: rows } = await db.query(`SELECT
+      const [rows] = await db.query(
+        `SELECT
           AVG(temperature) AS temperature,
           AVG(humidity) AS humidity,
           AVG(light_lux) AS light_lux,
@@ -146,7 +149,8 @@ router.post('/predict', authMiddleware, async (req, res) => {
           AVG(ch4) AS ch4,
           AVG(o2) AS o2,
           AVG(h2s) AS h2s
-        FROM sensors ${clause}`, [...params, req.body.startDate, req.body.endDate]
+        FROM sensors ${clause}`,
+        [...params, req.body.startDate, req.body.endDate]
       );
 
       const snapshot = rows && rows[0] ? rows[0] : null;
@@ -167,21 +171,21 @@ router.post('/predict', authMiddleware, async (req, res) => {
           endDate: req.body.endDate,
         },
       };
-
+      
       // Emit prediction via Socket.IO to the requesting user's room (or the target user if admin requested)
       if (io) {
         const emitTo = requestedUserId || authUserId;
         if (emitTo) io.to(`predictions:${emitTo}`).emit('prediction', response);
       }
-
+      
       return res.json(response);
     }
 
-   const { clause, params } = requestedUserId
-  ? { clause: 'WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1', params: [requestedUserId] }
-  : { clause: 'ORDER BY recorded_at DESC LIMIT 1', params: [] };
+    const { clause, params } = requestedUserId
+      ? { clause: 'WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1', params: [requestedUserId] }
+      : { clause: 'ORDER BY recorded_at DESC LIMIT 1', params: [] };
 
-    const { rows: rows } = await db.query(`SELECT * FROM sensors ${clause}`, params);
+    const [rows] = await db.query(`SELECT * FROM sensors ${clause}`, params);
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'No sensor data available' });
     }
@@ -195,13 +199,13 @@ router.post('/predict', authMiddleware, async (req, res) => {
       featureOrder: MODEL_FEATURE_ORDER,
       inputs: features,
     };
-
+    
     // Emit prediction via Socket.IO to the requesting user's room
     if (io) {
       const emitTo = requestedUserId || authUserId;
       if (emitTo) io.to(`predictions:${emitTo}`).emit('prediction', response);
     }
-
+    
     return res.json(response);
   } catch (error) {
     console.error('Prediction error:', error);
@@ -216,10 +220,12 @@ router.post('/predict', authMiddleware, async (req, res) => {
 async function verifyDeviceAndCheckAccount(deviceSerial, apiKey) {
   try {
     // Get device registration and user info
-    const { rows: devices } = await db.query(`SELECT dr.id, dr.user_id, u.status as user_status 
+    const [devices] = await db.query(
+      `SELECT dr.id, dr.user_id, u.status as user_status 
        FROM device_registrations dr 
        LEFT JOIN users u ON dr.user_id = u.id
-       WHERE dr.device_serial = $1 AND dr.api_key = $2`, [deviceSerial, apiKey]
+       WHERE dr.device_serial = ? AND dr.api_key = ?`,
+      [deviceSerial, apiKey]
     );
 
     if (!devices || devices.length === 0) {
@@ -236,11 +242,11 @@ async function verifyDeviceAndCheckAccount(deviceSerial, apiKey) {
     // Check if user account is active
     const userStatus = String(device.user_status || 'active').toLowerCase();
     if (userStatus !== 'active') {
-      return {
-        valid: false,
-        error: 'Account inactive - device locked',
+      return { 
+        valid: false, 
+        error: 'Account inactive - device locked', 
         code: 403,
-        deviceBlocked: true
+        deviceBlocked: true 
       };
     }
 
@@ -253,10 +259,10 @@ async function verifyDeviceAndCheckAccount(deviceSerial, apiKey) {
 
 router.post('/stream', async (req, res) => {
   try {
-    const {
+    const { 
       deviceId,        // ESP32 unique identifier
       temp1, temp2,    // DHT22, DS18B20
-      humidity, light,
+      humidity, light, 
       co2, nh3, lpg,   // Gas sensors
       solarVoltage, solarCurrent, solarPower,
       loadPower
@@ -267,17 +273,17 @@ router.post('/stream', async (req, res) => {
     const apiKey = req.headers['x-api-key'];
 
     if (!deviceSerial || !apiKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing x-device-serial or x-api-key headers'
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing x-device-serial or x-api-key headers' 
       });
     }
 
     // Verify device and check account status
     const authResult = await verifyDeviceAndCheckAccount(deviceSerial, apiKey);
     if (!authResult.valid) {
-      return res.status(authResult.code).json({
-        success: false,
+      return res.status(authResult.code).json({ 
+        success: false, 
         message: authResult.error,
         deviceBlocked: authResult.deviceBlocked || false
       });
@@ -292,24 +298,27 @@ router.post('/stream', async (req, res) => {
     const ownerUserId = authResult.userId;
     const resolvedDeviceId = authResult.deviceId || deviceId;
 
-   const { rows: sensorResult } = await db.query(`INSERT INTO sensors (user_id, temperature, humidity, light_lux, co2, nh3, ch4, o2, h2s)
-   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`, [
-      ownerUserId,
-      toNumber(temp2 || temp1, 25),
-      toNumber(humidity, 60),
-      toNumber(light, 500),
-      toNumber(co2, 400),
-      toNumber(nh3, 5),
-      0, // ch4
-      21, // o2
-      0  // h2s
-    ] 
+    const [sensorResult] = await db.query(
+      `INSERT INTO sensors (user_id, temperature, humidity, light_lux, co2, nh3, ch4, o2, h2s)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ownerUserId,
+        toNumber(temp2 || temp1, 25),
+        toNumber(humidity, 60),
+        toNumber(light, 500),
+        toNumber(co2, 400),
+        toNumber(nh3, 5),
+        0, // ch4
+        21, // o2
+        0  // h2s
+      ]
     );
+    await pruneTableToLatestRows(db, 'sensors');
 
     // Update user's last_seen heartbeat
     try {
       if (ownerUserId) {
-        await db.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [ownerUserId]);
+        await db.query('UPDATE users SET last_seen = NOW() WHERE id = ?', [ownerUserId]);
       }
     } catch (e) {
       // non-fatal
@@ -317,14 +326,17 @@ router.post('/stream', async (req, res) => {
     }
 
     // Store power data (associate with resolved device id)
-    await db.query(`INSERT INTO power_readings (device_id, solar_voltage, solar_current, solar_power, load_power)
-   VALUES ($1, $2, $3, $4, $5)
-   ON CONFLICT (device_id) DO UPDATE SET
-   solar_voltage = EXCLUDED.solar_voltage,
-   solar_current = EXCLUDED.solar_current,
-   solar_power = EXCLUDED.solar_power,
-   load_power = EXCLUDED.load_power`, [resolvedDeviceId, toNumber(solarVoltage, 0), toNumber(solarCurrent, 0), toNumber(solarPower, 0), toNumber(loadPower, 0)]
+    await db.query(
+      `INSERT INTO power_readings (device_id, solar_voltage, solar_current, solar_power, load_power)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE 
+       solar_voltage = VALUES(solar_voltage),
+       solar_current = VALUES(solar_current),
+       solar_power = VALUES(solar_power),
+       load_power = VALUES(load_power)`,
+      [resolvedDeviceId, toNumber(solarVoltage, 0), toNumber(solarCurrent, 0), toNumber(solarPower, 0), toNumber(loadPower, 0)]
     );
+    await pruneTableToLatestRows(db, 'power_readings');
 
     // Build normalized features for ML prediction
     const features = {
@@ -359,7 +371,7 @@ router.post('/stream', async (req, res) => {
         solarVoltage, solarCurrent, solarPower, loadPower
       },
       prediction,
-      storedId: sensorResult[0]?.id
+      storedId: sensorResult.insertId
     };
 
     // Broadcast to the owning user's room via Socket.IO
@@ -415,8 +427,10 @@ router.post('/control', authMiddleware, async (req, res) => {
     }
 
     // Store control command in database for ESP32 to fetch
-    const { rows: commandResult } = await db.query(`INSERT INTO device_commands (device_id, command, relay, state, requested_by, created_at)
-   VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING id`, [deviceId, command, relay || null, state ? 1 : 0, req.user?.id || 'system']
+    const [commandResult] = await db.query(
+      `INSERT INTO device_commands (device_id, command, relay, state, requested_by, created_at)
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [deviceId, command, relay || null, state ? 1 : 0, req.user?.id || 'system']
     );
 
     // Broadcast control command via Socket.IO (for real-time feedback)
@@ -434,7 +448,7 @@ router.post('/control', authMiddleware, async (req, res) => {
     return res.json({
       success: true,
       message: `Command '${command}' sent to device ${deviceId}`,
-      commandId: commandResult[0]?.id,
+      commandId: commandResult.insertId,
       command,
       relay,
       state
@@ -455,33 +469,37 @@ router.get('/control/:deviceId', async (req, res) => {
     const apiKey = req.headers['x-api-key'];
 
     if (!deviceSerial || !apiKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing x-device-serial or x-api-key headers'
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing x-device-serial or x-api-key headers' 
       });
     }
 
     // Verify device and check account status
     const authResult = await verifyDeviceAndCheckAccount(deviceSerial, apiKey);
     if (!authResult.valid) {
-      return res.status(authResult.code).json({
-        success: false,
+      return res.status(authResult.code).json({ 
+        success: false, 
         message: authResult.error,
         deviceBlocked: authResult.deviceBlocked || false,
         commands: []
       });
     }
 
-    const { rows: commands } = await db.query(`SELECT id, command, relay, state, created_at 
+    const [commands] = await db.query(
+      `SELECT id, command, relay, state, created_at 
        FROM device_commands 
-       WHERE device_id = $1 AND executed = 0
+       WHERE device_id = ? AND executed = 0
        ORDER BY created_at ASC
-       LIMIT 10`, [deviceId]
+       LIMIT 10`,
+      [deviceId]
     );
 
     if (commands.length > 0) {
       // Mark as executed
-      await db.query(`UPDATE device_commands SET executed = 1 WHERE device_id = $1 AND executed = 0`, [deviceId]
+      await db.query(
+        `UPDATE device_commands SET executed = 1 WHERE device_id = ? AND executed = 0`,
+        [deviceId]
       );
     }
 
@@ -505,7 +523,9 @@ router.get('/stream/latest/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
 
-    const { rows: rows } = await db.query(`SELECT * FROM sensors WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1`, [deviceId]
+    const [rows] = await db.query(
+      `SELECT * FROM sensors WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1`,
+      [deviceId]
     );
 
     if (!rows.length) {

@@ -12,8 +12,8 @@ router.get('/', authMiddleware, async (req, res) => {
   try {
     const admin = isAdminLike(req.user?.role);
     const requestedUserId = admin ? (req.query.userId || null) : req.user.uid;
-    const { rows: transactions } = await pool.query(
-      `SELECT * FROM transactions ${requestedUserId ? 'WHERE user_id = $1' : ''} ORDER BY timestamp DESC`,
+    const [transactions] = await pool.query(
+      `SELECT * FROM transactions ${requestedUserId ? 'WHERE user_id = ?' : ''} ORDER BY timestamp DESC`,
       requestedUserId ? [requestedUserId] : []
     );
     
@@ -43,12 +43,12 @@ router.post('/', authMiddleware, async (req, res) => {
     const admin = isAdminLike(req.user?.role);
     const targetUserId = admin && userId ? userId : req.user.uid;
     
-    // ✅ Fix 1: Use PostgreSQL gen_random_uuid() instead of MySQL UUID()
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
     const timestamp = Date.now();
     
-    await pool.query('INSERT INTO transactions (id, date, timestamp, type, category, amount, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7)', 
+    await pool.query(
+      'INSERT INTO transactions (id, date, timestamp, type, category, amount, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [id, date || new Date().toLocaleDateString(), timestamp, type, category, amount, targetUserId]
     );
     
@@ -63,14 +63,11 @@ router.post('/', authMiddleware, async (req, res) => {
 router.delete('/:id', authMiddleware, async (req, res) => {
   try {
     const admin = isAdminLike(req.user?.role);
-    
-    // ✅ Fix 2: Use PostgreSQL $ placeholders instead of ?, remove rows destructuring
-    const result = await pool.query(
-      `DELETE FROM transactions WHERE id = $1 ${admin ? '' : 'AND user_id = $2'}`,
+    const [result] = await pool.query(
+      `DELETE FROM transactions WHERE id = ? ${admin ? '' : 'AND user_id = ?'}`,
       admin ? [req.params.id] : [req.params.id, req.user.uid]
     );
-    
-    if (result.rowCount === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Transaction not found' });
     }
     res.json({ success: true, message: 'Transaction deleted successfully' });
@@ -85,14 +82,11 @@ router.put('/:id', authMiddleware, async (req, res) => {
   try {
     const admin = isAdminLike(req.user?.role);
     const { date, type, category, amount } = req.body;
-    
-    // ✅ Fix 3: Use PostgreSQL $ placeholders instead of ?, remove rows destructuring
-    const result = await pool.query(
-      `UPDATE transactions SET date = $1, type = $2, category = $3, amount = $4 WHERE id = $5 ${admin ? '' : 'AND user_id = $6'}`,
+    const [result] = await pool.query(
+      `UPDATE transactions SET date = ?, type = ?, category = ?, amount = ? WHERE id = ? ${admin ? '' : 'AND user_id = ?'}`,
       admin ? [date, type, category, amount, req.params.id] : [date, type, category, amount, req.params.id, req.user.uid]
     );
-    
-    if (result.rowCount === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Transaction not found' });
     }
     res.json({ success: true, message: 'Transaction updated successfully' });

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
+const { pruneTableToLatestRows } = require('../lib/pruneRows');
 const { authMiddleware } = require('./auth');
 
 // Get Socket.IO instance from server
@@ -82,11 +83,11 @@ router.get('/range', authMiddleware, async (req, res) => {
     if (!start || !end) {
       return res.status(400).json({ success: false, message: 'Missing start or end date' });
     }
-    const whereClause = requestedUserId ? 'WHERE user_id = $1 AND recorded_at BETWEEN $2 AND $3' : 'WHERE recorded_at BETWEEN $1 AND $2';
+    const whereClause = requestedUserId ? 'WHERE user_id = ? AND recorded_at BETWEEN ? AND ?' : 'WHERE recorded_at BETWEEN ? AND ?';
     const whereArgs = requestedUserId ? [requestedUserId, start, end] : [start, end];
 
     // Aggregate sensor data in range
-    const { rows } = await pool.query(
+    const [rows] = await pool.query(
       `SELECT 
         AVG(temperature) AS temperature,
         AVG(humidity) AS humidity,
@@ -152,10 +153,9 @@ function isAdminLike(role) {
 async function ensureSensorsSchema() {
   if (sensorsSchemaReady) return;
 
-  // ✅ Fix 1: PostgreSQL-compatible CREATE TABLE statements
   const createStatements = [
     `CREATE TABLE IF NOT EXISTS sensors (
-      id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      id INT AUTO_INCREMENT PRIMARY KEY,
       user_id VARCHAR(36) NULL,
       temperature DECIMAL(5,2) DEFAULT 37.5,
       humidity DECIMAL(5,2) DEFAULT 62.0,
@@ -169,7 +169,7 @@ async function ensureSensorsSchema() {
       recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE TABLE IF NOT EXISTS gas_readings (
-      id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      id INT AUTO_INCREMENT PRIMARY KEY,
       user_id VARCHAR(36) NULL,
       co2 DECIMAL(8,2) DEFAULT 415,
       nh3 DECIMAL(8,2) DEFAULT 2,
@@ -179,13 +179,13 @@ async function ensureSensorsSchema() {
       h2s DECIMAL(8,2) DEFAULT 0,
       recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
-    // ✅ Fixed power_readings CREATE TABLE
+    // Preferred power table used by the system (per device + per user).
     `CREATE TABLE IF NOT EXISTS power_readings (
-      id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      id INT AUTO_INCREMENT PRIMARY KEY,
       user_id VARCHAR(36) NULL,
       device_serial VARCHAR(100) NULL,
       reading_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      power_source VARCHAR(10) DEFAULT 'SOLAR',
+      power_source ENUM('SOLAR', 'GRID') DEFAULT 'SOLAR',
       voltage_dc DECIMAL(6,2) DEFAULT 13.2,
       current_dc DECIMAL(6,2) DEFAULT 1.8,
       grid_energy_kwh DECIMAL(12,4) DEFAULT 0,
@@ -193,28 +193,40 @@ async function ensureSensorsSchema() {
       cost_usd DECIMAL(12,4) DEFAULT 0,
       battery_percent INT DEFAULT 95,
       battery_status VARCHAR(20) NULL,
-      energy_note VARCHAR(100) NULL
+      energy_note VARCHAR(100) NULL,
+      INDEX idx_power_readings_user_id (user_id),
+      INDEX idx_power_readings_device_serial (device_serial),
+      INDEX idx_power_readings_reading_time (reading_time)
     )`,
-    // ✅ Fixed device_status CREATE TABLE
     `CREATE TABLE IF NOT EXISTS device_status (
-      id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      id INT AUTO_INCREMENT PRIMARY KEY,
       user_id VARCHAR(36) NULL,
-      heater VARCHAR(5) DEFAULT 'OFF',
-      fan VARCHAR(5) DEFAULT 'ON',
-      rotator VARCHAR(5) DEFAULT 'AUTO',
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      heater ENUM('ON', 'OFF') DEFAULT 'OFF',
+      fan ENUM('ON', 'OFF') DEFAULT 'ON',
+      rotator ENUM('ON', 'OFF', 'AUTO') DEFAULT 'AUTO',
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )`,
-    // ✅ Fixed device_commands CREATE TABLE
     `CREATE TABLE IF NOT EXISTS device_commands (
-      id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      id INT AUTO_INCREMENT PRIMARY KEY,
       device_id VARCHAR(100) NOT NULL,
       command VARCHAR(50) NOT NULL,
       relay VARCHAR(50) NULL,
-      state SMALLINT DEFAULT 0,
+      state TINYINT(1) DEFAULT 0,
       requested_by VARCHAR(100) NULL,
-      executed SMALLINT DEFAULT 0,
+      executed TINYINT(1) DEFAULT 0,
       executed_at TIMESTAMP NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_device_commands_device_id (device_id),
+      INDEX idx_device_commands_executed (executed)
+    )`
+    ,`CREATE TABLE IF NOT EXISTS sensor_data (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      device_id VARCHAR(36) NOT NULL,
+      data TEXT NOT NULL,
+      timestamp BIGINT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_sensor_data_device_id (device_id),
+      INDEX idx_sensor_data_timestamp (timestamp)
     )`
   ];
 
@@ -222,76 +234,99 @@ async function ensureSensorsSchema() {
     await pool.query(statement);
   }
 
-  // ✅ Added missing indexes
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_power_readings_user_id ON power_readings(user_id)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_power_readings_device_serial ON power_readings(device_serial)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_power_readings_reading_time ON power_readings(reading_time)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_device_commands_device_id ON device_commands(device_id)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_device_commands_executed ON device_commands(executed)');
-
   await pool.query(
     `INSERT INTO device_status (heater, fan, rotator)
      SELECT 'OFF', 'ON', 'AUTO'
      WHERE NOT EXISTS (SELECT 1 FROM device_status LIMIT 1)`
   );
 
-  // ✅ Fix 2: PostgreSQL-compatible ALTER statements with IF NOT EXISTS
   const alterStatements = [
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NULL',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS light_lux DECIMAL(10,2) DEFAULT 520',
-    'ALTER TABLE gas_readings ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NULL',
-    'ALTER TABLE device_status ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NULL',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS co2 DECIMAL(8,2) DEFAULT 400',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS nh3 DECIMAL(8,2) DEFAULT 2',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS ch4 DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS o2 DECIMAL(5,2) DEFAULT 20.9',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS lpg DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE sensors ADD COLUMN IF NOT EXISTS h2s DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE sensors ADD COLUMN user_id VARCHAR(36) NULL AFTER id',
+    'ALTER TABLE sensors ADD COLUMN light_lux DECIMAL(10,2) DEFAULT 520',
+    'ALTER TABLE gas_readings ADD COLUMN user_id VARCHAR(36) NULL AFTER id',
+    'ALTER TABLE device_status ADD COLUMN user_id VARCHAR(36) NULL AFTER id',
+    'ALTER TABLE sensors ADD COLUMN co2 DECIMAL(8,2) DEFAULT 400',
+    'ALTER TABLE sensors ADD COLUMN nh3 DECIMAL(8,2) DEFAULT 2',
+    'ALTER TABLE sensors ADD COLUMN ch4 DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE sensors ADD COLUMN o2 DECIMAL(5,2) DEFAULT 20.9',
+    'ALTER TABLE sensors ADD COLUMN lpg DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE sensors ADD COLUMN h2s DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE sensors MODIFY COLUMN recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER h2s',
   ];
+
   for (const statement of alterStatements) {
-    try { await pool.query(statement); } catch (e) { /* ignore */ }
+    try {
+      await pool.query(statement);
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') {
+        throw error;
+      }
+    }
   }
 
+  // Ensure/repair power_readings columns for older manual tables.
   const alterPowerReadings = [
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) NULL',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS device_id VARCHAR(100) NULL',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS device_serial VARCHAR(100) NULL',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS reading_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
-    "ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS power_source VARCHAR(10) DEFAULT 'SOLAR'",
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS voltage_dc DECIMAL(6,2) DEFAULT 13.2',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS current_dc DECIMAL(6,2) DEFAULT 1.8',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS solar_voltage DECIMAL(6,2) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS solar_current DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS solar_power DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS load_power DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS grid_energy_kwh DECIMAL(12,4) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS cost_rwf DECIMAL(12,2) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS cost_usd DECIMAL(12,4) DEFAULT 0',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS battery_percent INT DEFAULT 95',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS battery_status VARCHAR(20) NULL',
-    'ALTER TABLE power_readings ADD COLUMN IF NOT EXISTS energy_note VARCHAR(100) NULL',
+    'ALTER TABLE power_readings ADD COLUMN user_id VARCHAR(36) NULL AFTER id',
+    'ALTER TABLE power_readings ADD COLUMN device_id VARCHAR(100) NULL',
+    'ALTER TABLE power_readings ADD COLUMN device_serial VARCHAR(100) NULL',
+    'ALTER TABLE power_readings ADD COLUMN reading_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+    'ALTER TABLE power_readings ADD COLUMN power_source ENUM(\'SOLAR\',\'GRID\') DEFAULT \'SOLAR\'',
+    'ALTER TABLE power_readings ADD COLUMN voltage_dc DECIMAL(6,2) DEFAULT 13.2',
+    'ALTER TABLE power_readings ADD COLUMN current_dc DECIMAL(6,2) DEFAULT 1.8',
+    'ALTER TABLE power_readings ADD COLUMN solar_voltage DECIMAL(6,2) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN solar_current DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN solar_power DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN load_power DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN grid_energy_kwh DECIMAL(12,4) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN cost_rwf DECIMAL(12,2) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN cost_usd DECIMAL(12,4) DEFAULT 0',
+    'ALTER TABLE power_readings ADD COLUMN battery_percent INT DEFAULT 95',
+    'ALTER TABLE power_readings ADD COLUMN battery_status VARCHAR(20) NULL',
+    'ALTER TABLE power_readings ADD COLUMN energy_note VARCHAR(100) NULL'
   ];
-  for (const statement of alterPowerReadings) {
-    try { await pool.query(statement); } catch (e) { /* ignore */ }
-  }
 
   const alterGasReadings = [
-    'ALTER TABLE gas_readings ADD COLUMN IF NOT EXISTS lpg DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE gas_readings ADD COLUMN IF NOT EXISTS h2s DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE gas_readings ADD COLUMN lpg DECIMAL(8,2) DEFAULT 0',
+    'ALTER TABLE gas_readings ADD COLUMN h2s DECIMAL(8,2) DEFAULT 0'
   ];
-  for (const statement of alterGasReadings) {
-    try { await pool.query(statement); } catch (e) { /* ignore */ }
+
+  for (const statement of alterPowerReadings) {
+    try {
+      await pool.query(statement);
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') {
+        // Ignore when the column exists but the statement differs by type.
+        // Those differences can be handled manually if needed.
+        if (error.code === 'ER_PARSE_ERROR' || error.code === 'ER_NO_SUCH_TABLE') {
+          // If the table doesn't exist yet, CREATE TABLE above covers it.
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 
-  // ✅ Fix 3: PostgreSQL-compatible UPDATE backfill syntax
+  for (const statement of alterGasReadings) {
+    try {
+      await pool.query(statement);
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME' && error.code !== 'ER_DUP_KEYNAME') {
+        if (error.code === 'ER_PARSE_ERROR' || error.code === 'ER_NO_SUCH_TABLE') {
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  // Backfill user_id for rows that have a device_serial but no user_id.
+  // This enforces per-user isolation when reading power data.
   try {
     await pool.query(`
-      UPDATE power_readings
-      SET user_id = u.id
-      FROM users u
-      WHERE power_readings.device_serial = u.device_serial_number
-        AND power_readings.user_id IS NULL
-        AND power_readings.device_serial IS NOT NULL
+      UPDATE power_readings pr
+      INNER JOIN users u ON u.device_serial_number = pr.device_serial
+      SET pr.user_id = u.id
+      WHERE pr.user_id IS NULL AND pr.device_serial IS NOT NULL
     `);
   } catch (error) {
     // Ignore if manual table doesn't match exactly.
@@ -304,14 +339,13 @@ async function ensureSensorsSchema() {
 // GET /all-users-latest — supervisor reporting: latest sensor snapshot per farmer
 router.get('/all-users-latest', authMiddleware, async (req, res) => {
   try {
-    // ✅ Fix 4: Fixed req.user variable reference
     if (!isAdminLike(req.user?.role)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     await ensureSensorsSchema();
 
     // Latest sensor row per user_id
-    const { rows: sensors } = await pool.query(`
+    const [sensors] = await pool.query(`
       SELECT s.user_id, s.temperature, s.humidity, s.co2, s.nh3, s.recorded_at,
              u.full_name, u.email
       FROM sensors s
@@ -333,51 +367,56 @@ router.get('/all-users-latest', authMiddleware, async (req, res) => {
 router.get('/', authMiddleware, async (req, res) => {
   try {
     await ensureSensorsSchema();
-    // ✅ Fix 4: Fixed req.user variable reference
     const admin = isAdminLike(req.user?.role);
     const requestedUserId = admin ? (req.query.userId || null) : req.user.uid;
-    const whereClause = requestedUserId ? 'WHERE user_id = $1' : '';
+    const whereClause = requestedUserId ? 'WHERE user_id = ?' : '';
     const whereArgs = requestedUserId ? [requestedUserId] : [];
 
     // Get latest sensor readings
-    const { rows: sensors } = await pool.query(
+    const [sensors] = await pool.query(
       `SELECT * FROM sensors ${whereClause} ORDER BY recorded_at DESC LIMIT 1`,
       whereArgs
     );
-
+    
     // Get latest gas readings
-    const { rows: gas } = await pool.query(
+    const [gas] = await pool.query(
       `SELECT * FROM gas_readings ${whereClause} ORDER BY recorded_at DESC LIMIT 1`,
       whereArgs
     );
-
+    
     // Get latest power data (from power_readings)
-    const { rows: power } = await pool.query(
+    const [power] = await pool.query(
       `SELECT * FROM power_readings ${whereClause} ORDER BY reading_time DESC, id DESC LIMIT 1`,
       whereArgs
     );
-
+    
     // Get device status
-    const { rows: status } = await pool.query(
+    const [status] = await pool.query(
       `SELECT * FROM device_status ${whereClause} ORDER BY updated_at DESC LIMIT 1`,
       whereArgs
     );
 
     // Get latest device heartbeat/status timestamp from registration table
-    const { rows: deviceRegistration } = await pool.query(
+    const [deviceRegistration] = await pool.query(
       `SELECT last_seen FROM device_registrations ${whereClause} ORDER BY last_seen DESC LIMIT 1`,
       whereArgs
     );
 
     // Get recent history (used by dashboard charts)
     const limit = 12;
-    const { rows: sensorHistory } = await pool.query(`SELECT temperature, humidity, light_lux, co2, recorded_at FROM sensors ${whereClause} ORDER BY recorded_at DESC LIMIT $1`, [...whereArgs, limit]
+    const [sensorHistory] = await pool.query(
+      `SELECT temperature, humidity, light_lux, co2, recorded_at FROM sensors ${whereClause} ORDER BY recorded_at DESC LIMIT ?`,
+      [...whereArgs, limit]
     );
-    const { rows: gasHistory } = await pool.query(`SELECT co2, nh3, ch4, o2, lpg, h2s, recorded_at FROM gas_readings ${whereClause} ORDER BY recorded_at DESC LIMIT $1`, [...whereArgs, limit]
+    const [gasHistory] = await pool.query(
+      `SELECT co2, nh3, ch4, o2, lpg, h2s, recorded_at FROM gas_readings ${whereClause} ORDER BY recorded_at DESC LIMIT ?`,
+      [...whereArgs, limit]
     );
-    const { rows: powerHistory } = await pool.query(`SELECT voltage_dc AS voltage, current_dc AS current, reading_time AS recorded_at FROM power_readings ${whereClause} ORDER BY reading_time DESC, id DESC LIMIT $1`, [...whereArgs, limit]
+    const [powerHistory] = await pool.query(
+      `SELECT voltage_dc AS voltage, current_dc AS current, reading_time AS recorded_at FROM power_readings ${whereClause} ORDER BY reading_time DESC, id DESC LIMIT ?`,
+      [...whereArgs, limit]
     );
-
+    
     const sensorDataRaw = sensors[0] || null;
     const gasDataRaw = gas[0] || null;
     const powerRow = power[0] || null;
@@ -427,15 +466,15 @@ router.get('/', authMiddleware, async (req, res) => {
     const isOnline = lastSeen ? (Date.now() - lastSeen.getTime() <= THRESH_MS) : false;
     const powerData = powerRow
       ? {
-        source: powerRow.power_source || 'SOLAR',
-        voltage: powerRow.voltage_dc,
-        current: powerRow.current_dc,
-        cost_rwf: powerRow.cost_rwf,
-        total_energy_kwh: powerRow.grid_energy_kwh,
-        consumed_kwh: powerRow.grid_energy_kwh,
-        cost_usd: powerRow.cost_usd,
-        battery_level: powerRow.battery_percent,
-      }
+          source: powerRow.power_source || 'SOLAR',
+          voltage: powerRow.voltage_dc,
+          current: powerRow.current_dc,
+          cost_rwf: powerRow.cost_rwf,
+          total_energy_kwh: powerRow.grid_energy_kwh,
+          consumed_kwh: powerRow.grid_energy_kwh,
+          cost_usd: powerRow.cost_usd,
+          battery_level: powerRow.battery_percent,
+        }
       : { source: 'SOLAR', voltage: 12.8, current: 2.1, cost_rwf: 0, total_energy_kwh: 0, consumed_kwh: 0, cost_usd: 0, battery_level: 92 };
     const statusData = status[0] || { heater: 'OFF', fan: 'ON', rotator: 'AUTO' };
 
@@ -464,7 +503,7 @@ router.get('/', authMiddleware, async (req, res) => {
     });
 
     const asOf = (sensors[0] && sensors[0].recorded_at) || (gas[0] && gas[0].recorded_at) || (powerRow && powerRow.reading_time) || null;
-
+    
     res.json({
       sensors: {
         temperature: parseFloat(sensorData.temperature),
@@ -527,44 +566,52 @@ router.post('/update', async (req, res) => {
       sensorHumidity !== undefined ||
       sensorLightLux !== undefined ||
       Object.keys(gasPayload).length > 0;
-
+    
     if (hasSensorValues) {
-      await pool.query('INSERT INTO sensors (user_id, temperature, humidity, light_lux, co2, nh3, ch4, o2, lpg, h2s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [
-        ownerUserId,
-        sensorTemperature ?? 37.5,
-        sensorHumidity ?? 62,
-        sensorLightLux ?? 520,
-        gasPayload.CO2 ?? 400,
-        gasPayload.NH3 ?? 2,
-        gasPayload.CH4 ?? 0,
-        gasPayload.O2 ?? 21,
-        gasLpg,
-        gasH2S
-      ]
+      await pool.query(
+        'INSERT INTO sensors (user_id, temperature, humidity, light_lux, co2, nh3, ch4, o2, lpg, h2s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          ownerUserId,
+          sensorTemperature ?? 37.5,
+          sensorHumidity ?? 62,
+          sensorLightLux ?? 520,
+          gasPayload.CO2 ?? 400,
+          gasPayload.NH3 ?? 2,
+          gasPayload.CH4 ?? 0,
+          gasPayload.O2 ?? 21,
+          gasLpg,
+          gasH2S
+        ]
       );
+      await pruneTableToLatestRows(pool, 'sensors');
       // Update last_seen heartbeat for user
       try {
-        if (ownerUserId) await pool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [ownerUserId]);
+        if (ownerUserId) await pool.query('UPDATE users SET last_seen = NOW() WHERE id = ?', [ownerUserId]);
       } catch (e) {
         console.warn('Failed to update users.last_seen', e.message || e);
       }
       try {
         if (ownerUserId) {
-          await pool.query(`UPDATE device_registrations
+          await pool.query(
+            `UPDATE device_registrations
              SET status = 'active', last_seen = NOW()
-             WHERE user_id = $1`, [ownerUserId]
+             WHERE user_id = ?`,
+            [ownerUserId]
           );
         }
       } catch (e) {
         console.warn('Failed to update device_registrations.last_seen', e.message || e);
       }
     }
-
+    
     if (Object.keys(gasPayload).length > 0) {
-      await pool.query('INSERT INTO gas_readings (user_id, co2, nh3, ch4, o2, lpg, h2s) VALUES ($1, $2, $3, $4, $5, $6, $7)', [ownerUserId, gasPayload.CO2 || 400, gasPayload.NH3 || 2, gasPayload.CH4 || 0, gasPayload.O2 || 21, gasLpg, gasH2S]
+      await pool.query(
+        'INSERT INTO gas_readings (user_id, co2, nh3, ch4, o2, lpg, h2s) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [ownerUserId, gasPayload.CO2 || 400, gasPayload.NH3 || 2, gasPayload.CH4 || 0, gasPayload.O2 || 21, gasLpg, gasH2S]
       );
+      await pruneTableToLatestRows(pool, 'gas_readings');
     }
-
+    
     if (power) {
       const normalizedSource = String(power.source || 'SOLAR').trim().toUpperCase().includes('GRID') ? 'GRID' : 'SOLAR';
 
@@ -573,7 +620,7 @@ router.post('/update', async (req, res) => {
       let deviceSerial = serialFromPayload;
       if (!deviceSerial && ownerUserId) {
         try {
-          const { rows } = await pool.query('SELECT device_serial_number FROM users WHERE id = $1 LIMIT 1', [ownerUserId]);
+          const [rows] = await pool.query('SELECT device_serial_number FROM users WHERE id = ? LIMIT 1', [ownerUserId]);
           deviceSerial = rows?.[0]?.device_serial_number || null;
         } catch (error) {
           deviceSerial = null;
@@ -595,36 +642,41 @@ router.post('/update', async (req, res) => {
         ? Number(power.cost_USD ?? (costRwf / 1400))
         : 0;
 
-      await pool.query(`INSERT INTO power_readings (
+      await pool.query(
+        `INSERT INTO power_readings (
           user_id, device_serial, power_source, voltage_dc, current_dc,
           grid_energy_kwh, cost_rwf, cost_usd,
           battery_percent, battery_status, energy_note
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [
-        ownerUserId,
-        deviceSerial,
-        normalizedSource,
-        Number(power.voltage ?? 13.2),
-        Number(normalizedCurrent || 0),
-        consumedKwh,
-        costRwf,
-        costUsd,
-        power.batteryLevel || 95,
-        power.batteryStatus || null,
-        power.energy_note || (normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
-      ]
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          ownerUserId,
+          deviceSerial,
+          normalizedSource,
+          Number(power.voltage ?? 13.2),
+          Number(normalizedCurrent || 0),
+          consumedKwh,
+          costRwf,
+          costUsd,
+          power.batteryLevel || 95,
+          power.batteryStatus || null,
+          power.energy_note || (normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
+        ]
       );
+      await pruneTableToLatestRows(pool, 'power_readings');
     }
-
+    
     if (status) {
-      await pool.query('INSERT INTO device_status (user_id, heater, fan, rotator) VALUES ($1, $2, $3, $4)', [ownerUserId, status.heater || 'OFF', status.fan || 'ON', status.rotator || 'AUTO']
+      await pool.query(
+        'INSERT INTO device_status (user_id, heater, fan, rotator) VALUES (?, ?, ?, ?)',
+        [ownerUserId, status.heater || 'OFF', status.fan || 'ON', status.rotator || 'AUTO']
       );
     }
-
+    
     // Trigger real-time prediction if user ID available
     if (ownerUserId && hasSensorValues) {
       triggerRealtimePrediction(ownerUserId);
     }
-
+    
     res.json({ success: true, message: 'Sensor data updated' });
   } catch (error) {
     console.error('Update sensors error:', error);
@@ -656,7 +708,9 @@ router.post('/update-by-serial', async (req, res) => {
     }
 
     // Resolve serial number from the device registry first so unassigned chips cannot post data.
-    const { rows: registrations } = await pool.query('SELECT user_id, status FROM device_registrations WHERE device_serial = $1 AND api_key = $2 LIMIT 1', [resolvedSerial, headerApiKey]
+    const [registrations] = await pool.query(
+      'SELECT id, user_id, status FROM device_registrations WHERE device_serial = ? AND api_key = ? LIMIT 1',
+      [resolvedSerial, headerApiKey]
     );
     if (!registrations.length) {
       return res.status(403).json({ success: false, message: `Invalid device credentials for serial number: ${resolvedSerial}` });
@@ -665,6 +719,7 @@ router.post('/update-by-serial', async (req, res) => {
     const registration = registrations[0];
     const registrationStatus = String(registration.status || '').toLowerCase();
     const ownerUserId = String(registration.user_id || '').trim();
+    const registrationId = String(registration.id || '').trim();
 
     if (!ownerUserId || !['linked', 'active'].includes(registrationStatus)) {
       return res.status(409).json({
@@ -674,7 +729,9 @@ router.post('/update-by-serial', async (req, res) => {
       });
     }
 
-    const { rows: users } = await pool.query('SELECT id, status FROM users WHERE id = $1 LIMIT 1', [ownerUserId]
+    const [users] = await pool.query(
+      'SELECT id, status FROM users WHERE id = ? LIMIT 1',
+      [ownerUserId]
     );
     if (!users.length) {
       return res.status(404).json({ success: false, message: `No user found for assigned device serial: ${resolvedSerial}` });
@@ -700,18 +757,34 @@ router.post('/update-by-serial', async (req, res) => {
       Object.keys(gasPayload).length > 0;
 
     if (hasSensorValues) {
-      await pool.query('INSERT INTO sensors (user_id, temperature, humidity, light_lux, co2, nh3, ch4, o2, lpg, h2s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [ownerUserId, sensorTemperature ?? 37.5, sensorHumidity ?? 62, sensorLightLux ?? 520,
-        gasPayload.CO2 ?? 400, gasPayload.NH3 ?? 2, gasPayload.CH4 ?? 0, gasPayload.O2 ?? 21, gasLpg, gasH2S]
+      await pool.query(
+        'INSERT INTO sensors (user_id, temperature, humidity, light_lux, co2, nh3, ch4, o2, lpg, h2s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [ownerUserId, sensorTemperature ?? 37.5, sensorHumidity ?? 62, sensorLightLux ?? 520,
+         gasPayload.CO2 ?? 400, gasPayload.NH3 ?? 2, gasPayload.CH4 ?? 0, gasPayload.O2 ?? 21, gasLpg, gasH2S]
       );
+      await pruneTableToLatestRows(pool, 'sensors');
       try {
-        if (ownerUserId) await pool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [ownerUserId]);
+        const rawTelemetry = JSON.stringify(req.body || {});
+        const rawTimestamp = Number(req.body?.timestamp || Date.now());
+        await pool.query(
+          'INSERT INTO sensor_data (device_id, data, timestamp) VALUES (?, ?, ?)',
+          [registrationId, rawTelemetry, rawTimestamp]
+        );
+        await pruneTableToLatestRows(pool, 'sensor_data');
+      } catch (err) {
+        console.warn('Failed to persist raw sensor_data telemetry:', err.message || err);
+      }
+      try {
+        if (ownerUserId) await pool.query('UPDATE users SET last_seen = NOW() WHERE id = ?', [ownerUserId]);
       } catch (e) {
         console.warn('Failed to update users.last_seen (by-serial)', e.message || e);
       }
       try {
-        await pool.query(`UPDATE device_registrations
+        await pool.query(
+          `UPDATE device_registrations
            SET status = 'active', last_seen = NOW()
-           WHERE device_serial = $1`, [resolvedSerial]
+           WHERE device_serial = ?`,
+          [resolvedSerial]
         );
       } catch (e) {
         console.warn('Failed to update device_registrations.last_seen (by-serial)', e.message || e);
@@ -719,8 +792,11 @@ router.post('/update-by-serial', async (req, res) => {
     }
 
     if (Object.keys(gasPayload).length > 0) {
-      await pool.query('INSERT INTO gas_readings (user_id, co2, nh3, ch4, o2, lpg, h2s) VALUES ($1, $2, $3, $4, $5, $6, $7)', [ownerUserId, gasPayload.CO2 || 400, gasPayload.NH3 || 2, gasPayload.CH4 || 0, gasPayload.O2 || 21, gasLpg, gasH2S]
+      await pool.query(
+        'INSERT INTO gas_readings (user_id, co2, nh3, ch4, o2, lpg, h2s) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [ownerUserId, gasPayload.CO2 || 400, gasPayload.NH3 || 2, gasPayload.CH4 || 0, gasPayload.O2 || 21, gasLpg, gasH2S]
       );
+      await pruneTableToLatestRows(pool, 'gas_readings');
     }
 
     if (power) {
@@ -736,28 +812,33 @@ router.post('/update-by-serial', async (req, res) => {
         ? Number(power.cost_USD ?? (costRwf / 1400))
         : 0;
 
-      await pool.query(`INSERT INTO power_readings (
+      await pool.query(
+        `INSERT INTO power_readings (
           user_id, device_serial, power_source, voltage_dc, current_dc,
           grid_energy_kwh, cost_rwf, cost_usd,
           battery_percent, battery_status, energy_note
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [
-        ownerUserId,
-        resolvedSerial,
-        normalizedSource,
-        power.voltage || 13.2,
-        power.current || 1.8,
-        consumedKwh,
-        costRwf,
-        costUsd,
-        power.batteryLevel || 95,
-        power.batteryStatus || null,
-        power.energy_note || (normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
-      ]
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          ownerUserId,
+          resolvedSerial,
+          normalizedSource,
+          power.voltage || 13.2,
+          power.current || 1.8,
+          consumedKwh,
+          costRwf,
+          costUsd,
+          power.batteryLevel || 95,
+          power.batteryStatus || null,
+          power.energy_note || (normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
+        ]
       );
+      await pruneTableToLatestRows(pool, 'power_readings');
       try {
-        await pool.query(`UPDATE device_registrations
+        await pool.query(
+          `UPDATE device_registrations
            SET status = 'active', last_seen = NOW()
-           WHERE device_serial = $1`, [resolvedSerial]
+           WHERE device_serial = ?`,
+          [resolvedSerial]
         );
       } catch (e) {
         console.warn('Failed to update device_registrations.last_seen after power insert', e.message || e);
@@ -765,7 +846,9 @@ router.post('/update-by-serial', async (req, res) => {
     }
 
     if (status) {
-      await pool.query('INSERT INTO device_status (user_id, heater, fan, rotator) VALUES ($1, $2, $3, $4)', [ownerUserId, status.heater || 'OFF', status.fan || 'ON', status.rotator || 'AUTO']
+      await pool.query(
+        'INSERT INTO device_status (user_id, heater, fan, rotator) VALUES (?, ?, ?, ?)',
+        [ownerUserId, status.heater || 'OFF', status.fan || 'ON', status.rotator || 'AUTO']
       );
     }
 
@@ -786,8 +869,8 @@ router.get('/power/cost', authMiddleware, async (req, res) => {
   try {
     const admin = isAdminLike(req.user?.role);
     const requestedUserId = admin ? (req.query.userId || null) : req.user.uid;
-    const { rows: power } = await pool.query(
-      `SELECT cost_rwf FROM power_readings ${requestedUserId ? 'WHERE user_id = $1' : ''} ORDER BY reading_time DESC, id DESC LIMIT 1`,
+    const [power] = await pool.query(
+      `SELECT cost_rwf FROM power_readings ${requestedUserId ? 'WHERE user_id = ?' : ''} ORDER BY reading_time DESC, id DESC LIMIT 1`,
       requestedUserId ? [requestedUserId] : []
     );
     res.json({ cost_RWF: power[0]?.cost_rwf || 0 });
@@ -800,16 +883,18 @@ router.get('/power/cost', authMiddleware, async (req, res) => {
 // Helper function to trigger real-time prediction on new sensor data
 async function triggerRealtimePrediction(userId) {
   if (!io) return; // Socket.IO not available
-
+  
   try {
     // Get latest sensor row
-    const { rows } = await pool.query('SELECT * FROM sensors WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1', [userId]
+    const [rows] = await pool.query(
+      'SELECT * FROM sensors WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1',
+      [userId]
     );
-
+    
     if (!rows || !rows.length) return;
-
+    
     const sensorRow = rows[0];
-
+    
     // Normalize sensor data to model features
     const features = {
       Ammonia_ppm: Number(sensorRow.nh3 ?? 0),
@@ -823,7 +908,7 @@ async function triggerRealtimePrediction(userId) {
       Light_lux: Number(sensorRow.light_lux ?? 0),
       Methane_ppm: Number(sensorRow.ch4 ?? 0),
     };
-
+    
     const prediction = await runPythonPrediction({ features });
 
     io.to(`predictions:${userId}`).emit('prediction', {

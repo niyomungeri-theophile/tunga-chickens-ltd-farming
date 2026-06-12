@@ -102,12 +102,11 @@ const AUTO_DELETE_INTERVAL_MS = 60 * 60 * 1000; // Check every hour
 
 setInterval(async () => {
   try {
-    // PostgreSQL: use INTERVAL '1 day' and rowCount instead of affectedRows
     const result = await db.query(
-      "DELETE FROM announcements WHERE created_at < (NOW() - INTERVAL '1 day')"
+      "DELETE FROM announcements WHERE created_at < (NOW() - INTERVAL 1 DAY)"
     );
-    if (result.rowCount > 0) {
-      console.log(`Auto-deleted ${result.rowCount} old announcements`);
+    if (result && result.affectedRows > 0) {
+      console.log(`Auto-deleted ${result.affectedRows} old announcements`);
     }
   } catch (err) {
     console.error('Auto-delete error:', err.message);

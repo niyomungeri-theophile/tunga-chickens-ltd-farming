@@ -38,18 +38,17 @@ let tableEnsured = false;
 async function ensureTeamMembersTable() {
   if (tableEnsured) return;
 
-  // ✅ Fix 1: PostgreSQL-compatible CREATE TABLE (removed MySQL-specific syntax)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS team_members (
-      id VARCHAR(36) PRIMARY KEY,
+      id VARCHAR(36) PRIMARY KEY DEFAULT (UUID()),
       name VARCHAR(120) NOT NULL,
       role VARCHAR(120) NOT NULL,
       description TEXT NULL,
       image_url VARCHAR(500) NOT NULL,
       display_order INT NOT NULL DEFAULT 1,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
   tableEnsured = true;
@@ -58,7 +57,7 @@ async function ensureTeamMembersTable() {
 router.get('/', async (_req, res) => {
   try {
     await ensureTeamMembersTable();
-    const { rows } = await pool.query(
+    const [rows] = await pool.query(
       `SELECT id, name, role, description, image_url, display_order, created_at
        FROM team_members
        ORDER BY display_order ASC, created_at DESC`
@@ -82,14 +81,13 @@ router.post('/', authMiddleware, upload.single('image'), async (req, res) => {
     if (!imageUrl) {
       return res.status(400).json({ success: false, message: 'Team member image is required.' });
     }
-    
-    // ✅ Fix 2: Use PostgreSQL gen_random_uuid() instead of MySQL UUID()
-    const { rows: uuidResult } = await pool.query('SELECT gen_random_uuid() as uuid');
-    const id = uuidResult[0].uuid;
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
+    const id = uuidResult[0]?.uuid;
 
-    await pool.query(`INSERT INTO team_members (id, name, role, description, image_url, display_order)
-       VALUES ($1, $2, $3, $4, $5, $6)`, 
-       [id, String(name).trim(), String(role).trim(), description ? String(description).trim() : null, imageUrl, Number(displayOrder) || 1]
+    await pool.query(
+      `INSERT INTO team_members (id, name, role, description, image_url, display_order)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, String(name).trim(), String(role).trim(), description ? String(description).trim() : null, imageUrl, Number(displayOrder) || 1]
     );
 
     res.json({ success: true, id, imageUrl });
@@ -111,7 +109,8 @@ router.put('/:id/order', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { displayOrder } = req.body || {};
 
-    await pool.query('UPDATE team_members SET display_order = $1 WHERE id = $2', 
+    await pool.query(
+      'UPDATE team_members SET display_order = ? WHERE id = ?',
       [Number(displayOrder) || 1, id]
     );
 
@@ -127,10 +126,10 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     await ensureTeamMembersTable();
     const { id } = req.params;
 
-    const { rows: existing } = await pool.query('SELECT image_url FROM team_members WHERE id = $1', [id]);
+    const [existing] = await pool.query('SELECT image_url FROM team_members WHERE id = ?', [id]);
     const storedUrl = existing[0]?.image_url || '';
 
-    await pool.query('DELETE FROM team_members WHERE id = $1', [id]);
+    await pool.query('DELETE FROM team_members WHERE id = ?', [id]);
 
     if (storedUrl.startsWith('/uploads/')) {
       const diskPath = path.join(__dirname, '..', storedUrl);
