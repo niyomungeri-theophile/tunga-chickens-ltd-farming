@@ -326,16 +326,29 @@ router.post('/stream', async (req, res) => {
     }
 
     // Store power data (associate with resolved device id)
-    await db.query(
-      `INSERT INTO power_readings (device_id, solar_voltage, solar_current, solar_power, load_power)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE 
-       solar_voltage = VALUES(solar_voltage),
-       solar_current = VALUES(solar_current),
-       solar_power = VALUES(solar_power),
-       load_power = VALUES(load_power)`,
-      [resolvedDeviceId, toNumber(solarVoltage, 0), toNumber(solarCurrent, 0), toNumber(solarPower, 0), toNumber(loadPower, 0)]
-    );
+    if (db.isPostgres) {
+      await db.query(
+        `INSERT INTO power_readings (device_id, solar_voltage, solar_current, solar_power, load_power)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (device_id) DO UPDATE SET
+           solar_voltage = EXCLUDED.solar_voltage,
+           solar_current = EXCLUDED.solar_current,
+           solar_power = EXCLUDED.solar_power,
+           load_power = EXCLUDED.load_power`,
+        [resolvedDeviceId, toNumber(solarVoltage, 0), toNumber(solarCurrent, 0), toNumber(solarPower, 0), toNumber(loadPower, 0)]
+      );
+    } else {
+      await db.query(
+        `INSERT INTO power_readings (device_id, solar_voltage, solar_current, solar_power, load_power)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           solar_voltage = VALUES(solar_voltage),
+           solar_current = VALUES(solar_current),
+           solar_power = VALUES(solar_power),
+           load_power = VALUES(load_power)`,
+        [resolvedDeviceId, toNumber(solarVoltage, 0), toNumber(solarCurrent, 0), toNumber(solarPower, 0), toNumber(loadPower, 0)]
+      );
+    }
     await pruneTableToLatestRows(db, 'power_readings');
 
     // Build normalized features for ML prediction

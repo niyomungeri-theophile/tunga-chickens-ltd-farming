@@ -183,6 +183,7 @@ async function ensureSensorsSchema() {
     `CREATE TABLE IF NOT EXISTS power_readings (
       id INT AUTO_INCREMENT PRIMARY KEY,
       user_id VARCHAR(36) NULL,
+      device_id VARCHAR(100) NULL,
       device_serial VARCHAR(100) NULL,
       reading_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       power_source ENUM('SOLAR', 'GRID') DEFAULT 'SOLAR',
@@ -194,6 +195,7 @@ async function ensureSensorsSchema() {
       battery_percent INT DEFAULT 95,
       battery_status VARCHAR(20) NULL,
       energy_note VARCHAR(100) NULL,
+      UNIQUE INDEX ux_power_readings_device_id (device_id),
       INDEX idx_power_readings_user_id (user_id),
       INDEX idx_power_readings_device_serial (device_serial),
       INDEX idx_power_readings_reading_time (reading_time)
@@ -250,8 +252,10 @@ async function ensureSensorsSchema() {
     'ALTER TABLE sensors ADD COLUMN ch4 DECIMAL(8,2) DEFAULT 0',
     'ALTER TABLE sensors ADD COLUMN o2 DECIMAL(5,2) DEFAULT 20.9',
     'ALTER TABLE sensors ADD COLUMN lpg DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE sensors ADD COLUMN h2s DECIMAL(8,2) DEFAULT 0',
-    'ALTER TABLE sensors MODIFY COLUMN recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER h2s',
+    'ALTER TABLE sensors ADD COLUMN h2s DECIMAL(8,2) DEFAULT 0'
+  ];
+  const postgresAlterStatements = [
+    'ALTER TABLE sensors ALTER COLUMN recorded_at SET DEFAULT CURRENT_TIMESTAMP'
   ];
 
   for (const statement of alterStatements) {
@@ -260,6 +264,19 @@ async function ensureSensorsSchema() {
     } catch (error) {
       if (error.code !== 'ER_DUP_FIELDNAME') {
         throw error;
+      }
+    }
+  }
+
+  if (pool.isPostgres) {
+    for (const statement of postgresAlterStatements) {
+      try {
+        await pool.query(statement);
+      } catch (error) {
+        if (error.code !== '42703' && error.code !== '42701') {
+          // Ignore missing column or duplicate/default errors during schema repair
+          console.warn('Postgres schema adjustment skipped:', error.code || error.message);
+        }
       }
     }
   }
@@ -322,12 +339,23 @@ async function ensureSensorsSchema() {
   // Backfill user_id for rows that have a device_serial but no user_id.
   // This enforces per-user isolation when reading power data.
   try {
-    await pool.query(`
-      UPDATE power_readings pr
-      INNER JOIN users u ON u.device_serial_number = pr.device_serial
-      SET pr.user_id = u.id
-      WHERE pr.user_id IS NULL AND pr.device_serial IS NOT NULL
-    `);
+    if (pool.isPostgres) {
+      await pool.query(`
+        UPDATE power_readings pr
+        SET user_id = u.id
+        FROM users u
+        WHERE u.device_serial_number = pr.device_serial
+          AND pr.user_id IS NULL
+          AND pr.device_serial IS NOT NULL
+      `);
+    } else {
+      await pool.query(`
+        UPDATE power_readings pr
+        INNER JOIN users u ON u.device_serial_number = pr.device_serial
+        SET pr.user_id = u.id
+        WHERE pr.user_id IS NULL AND pr.device_serial IS NOT NULL
+      `);
+    }
   } catch (error) {
     // Ignore if manual table doesn't match exactly.
     console.warn('power_readings backfill skipped:', error.code || error.message);

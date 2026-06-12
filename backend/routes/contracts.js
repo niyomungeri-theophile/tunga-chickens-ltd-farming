@@ -98,9 +98,11 @@ async function ensureContractsSchema() {
 // Auto-generate contract number: ESPCS-YYYY-NNN
 async function generateContractNumber() {
   const year = new Date().getFullYear();
+  const startOfYear = new Date(year, 0, 1);
+  const startOfNextYear = new Date(year + 1, 0, 1);
   const [rows] = await pool.query(
-    'SELECT COUNT(*) AS cnt FROM contracts WHERE YEAR(created_at) = ?',
-    [year]
+    'SELECT COUNT(*) AS cnt FROM contracts WHERE created_at >= ? AND created_at < ?',
+    [startOfYear, startOfNextYear]
   );
   const seq = (parseInt(rows[0].cnt, 10) || 0) + 1;
   return `ESPCS-${year}-${String(seq).padStart(3, '0')}`;
