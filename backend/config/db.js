@@ -73,13 +73,15 @@ function extractInlineIndexes(sql) {
   const tableNameMatch = sql.match(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"?([\w.]+)"?/i);
   const tableName = tableNameMatch ? tableNameMatch[1] : null;
 
-  const cleanedSql = sql.replace(/,?\s*(UNIQUE\s+)?(?:KEY|INDEX)\s+"?(\w+)"?\s*\(([^)]+)\)\s*,?/gi, (match, unique, indexName, columns) => {
+  let cleanedSql = sql.replace(/^\s*,?\s*(UNIQUE\s+)?\b(?:KEY|INDEX)\b\s+"?(\w+)"?\s*\(([^)]+)\)\s*,?\s*$/gmi, (match, unique, indexName, columns) => {
     if (!tableName) return '';
     const uniqueClause = unique ? 'UNIQUE ' : '';
     const cols = columns.replace(/`/g, '"').trim();
     indexes.push(`CREATE ${uniqueClause}INDEX IF NOT EXISTS "${indexName}" ON "${tableName}" (${cols});`);
     return '';
   });
+
+  cleanedSql = cleanedSql.replace(/,\s*(\r?\n\s*\))/g, '$1');
 
   return { cleanedSql, indexStatements: indexes };
 }
