@@ -93,7 +93,7 @@ function lockNotificationTemplate(fullName, deviceSerial) {
     `Dear ${fullName},`,
     '',
     'YOUR SYSTEM LOCKED !!',
-    'Contact TCL Team For imadiatly call Eng Theophile',
+    'Contact TCL Team For immediate call Eng Theophile',
     '+250785133511 & 0725283858',
     '',
     `Device serial: ${deviceSerial}`
@@ -101,7 +101,7 @@ function lockNotificationTemplate(fullName, deviceSerial) {
   const html = `
     <p>Dear ${fullName},</p>
     <p><strong>YOUR SYSTEM LOCKED !!</strong></p>
-    <p>Contact TCL Team For imadiatly call Eng Theophile</p>
+    <p>Contact TCL Team For immediate call Eng Theophile</p>
     <p><strong>+250785133511 &amp; 0725283858</strong></p>
     <p>Device serial: <strong>${deviceSerial}</strong></p>
   `;
@@ -233,14 +233,16 @@ function formatDeviceSerialNumber(sequence) {
 
 async function generateNextDeviceSerialNumber() {
   const [rows] = await pool.query(`
-    SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial, '-', 2), '-', -1) AS UNSIGNED)) AS max_serial
-    FROM device_registrations
-    WHERE device_serial REGEXP '^NT-[0-9]+-TCL$'
+    SELECT GREATEST(
+      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number,'-',2),'-',-1) AS UNSIGNED))
+                FROM users WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'), 0),
+      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial,'-',2),'-',-1) AS UNSIGNED))
+                FROM device_registrations WHERE device_serial REGEXP '^NT-[0-9]+-TCL$'), 0)
+    ) AS max_serial
   `);
-
   const currentMax = Number(rows?.[0]?.max_serial);
-  const nextSequence = Number.isFinite(currentMax) ? currentMax + 1 : 1;
-  return formatDeviceSerialNumber(nextSequence);
+  const nextSeq = (Number.isFinite(currentMax) && currentMax > 0) ? currentMax + 1 : 1;
+  return formatDeviceSerialNumber(nextSeq);
 }
 
 // Sync a user's assigned device serial to the actual linked device record.
@@ -819,7 +821,7 @@ router.get('/admin/all', authMiddleware, async (req, res) => {
         u.full_name, u.email
        FROM device_registrations d
        LEFT JOIN users u ON d.user_id = u.id
-       ORDER BY d.created_at DESC`
+       ORDER BY CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(d.device_serial, '-', 2), '-', -1) AS UNSIGNED) ASC`
     );
 
     return res.json({ success: true, devices });

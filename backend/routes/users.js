@@ -148,20 +148,40 @@ async function sendAccountLockedEmail({ email, fullName, lockedAt, role }) {
   });
 }
 
-function formatDeviceSerialNumber(sequence) {
-  return `NT-${String(sequence).padStart(2, '0')}-TCL`;
+function generateApiKey() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < 48; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+  return result;
 }
 
-async function generateNextDeviceSerialNumber() {
-  const [rows] = await pool.query(`
-    SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number, '-', 2), '-', -1) AS UNSIGNED)) AS max_serial
-    FROM users
-    WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'
-  `);
+// Returns the next available serial: reuses freed slots (from deleted farmers) before
+// generating a new number, ensuring ascending order without gaps.
+async function reserveNextDeviceSerial() {
+  try {
+    const [freed] = await pool.query(`
+      SELECT device_serial FROM device_registrations
+      WHERE user_id IS NULL
+        AND (esp32_chip_id IS NULL OR esp32_chip_id = '')
+        AND status = 'unregistered'
+        AND device_serial REGEXP '^NT-[0-9]+-TCL$'
+      ORDER BY CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial, '-', 2), '-', -1) AS UNSIGNED) ASC
+      LIMIT 1
+    `);
+    if (freed.length > 0) return freed[0].device_serial;
+  } catch (_) { /* device_registrations table not yet created, fall through */ }
 
+  const [rows] = await pool.query(`
+    SELECT GREATEST(
+      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number,'-',2),'-',-1) AS UNSIGNED))
+                FROM users WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'), 0),
+      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial,'-',2),'-',-1) AS UNSIGNED))
+                FROM device_registrations WHERE device_serial REGEXP '^NT-[0-9]+-TCL$'), 0)
+    ) AS max_serial
+  `);
   const currentMax = Number(rows?.[0]?.max_serial);
-  const nextSequence = Number.isFinite(currentMax) ? currentMax + 1 : 1;
-  return formatDeviceSerialNumber(nextSequence);
+  const nextSeq = (Number.isFinite(currentMax) && currentMax > 0) ? currentMax + 1 : 1;
+  return `NT-${String(nextSeq).padStart(2, '0')}-TCL`;
 }
 
 // Get all users
@@ -302,8 +322,9 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, message: 'You do not have permission to delete this account.' });
     }
 
-    // Delete any linked device registration entirely when deleting the user account.
-    // Also remove stored device credentials so the ESP32 sees the device as deleted.
+    // Reset linked device registrations so their serial numbers become available for the next farmer.
+    // The device_registrations row is kept (serial preserved) but chip ID, user link, and credentials
+    // are cleared so the ESP32 must re-provision on next boot.
     const [deviceRows] = await pool.query(
       'SELECT device_serial FROM device_registrations WHERE user_id = ?',
       [req.params.id]
@@ -311,19 +332,23 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     const deviceSerials = deviceRows.map(row => row.device_serial).filter(Boolean);
 
     if (deviceSerials.length > 0) {
+      // Invalidate old API keys so the ESP32 cannot reuse them
       await pool.query(
         `DELETE FROM device_credentials WHERE device_serial IN (${deviceSerials.map(() => '?').join(',')})`,
         deviceSerials
       );
+      // Free the serial: clear chip ID and user link so the slot is reusable
+      await pool.query(
+        `UPDATE device_registrations
+         SET esp32_chip_id = NULL, user_id = NULL, status = 'unregistered',
+             linked_at = NULL, last_seen = NULL
+         WHERE device_serial IN (${deviceSerials.map(() => '?').join(',')})`,
+        deviceSerials
+      );
     }
 
-    await pool.query(
-      `DELETE FROM device_registrations WHERE user_id = ?`,
-      [req.params.id]
-    );
-
     await pool.query('DELETE FROM users WHERE id = ?', [req.params.id]);
-    res.json({ success: true, message: 'User deleted successfully. Assigned devices and credentials have been removed.' });
+    res.json({ success: true, message: 'User deleted successfully. Device serial numbers have been freed for reassignment.' });
   } catch (error) {
     console.error('Delete user error:', error);
     res.status(500).json({ success: false, message: 'Failed to delete user' });
@@ -414,8 +439,29 @@ router.put('/:id', authMiddleware, async (req, res) => {
       : null;
 
     // If an account is (or becomes) a farmer, ensure it has an assigned serial.
+    let serialWasJustGenerated = false;
     if (safeRole === 'farmer' && !nextDeviceSerialNumber) {
-      nextDeviceSerialNumber = await generateNextDeviceSerialNumber();
+      nextDeviceSerialNumber = await reserveNextDeviceSerial();
+      serialWasJustGenerated = true;
+    }
+
+    // Pre-reserve the slot in device_registrations so the ESP32 can claim it on first boot.
+    if (serialWasJustGenerated && nextDeviceSerialNumber) {
+      const apiKey = generateApiKey();
+      try {
+        await pool.query(
+          `INSERT INTO device_registrations (device_serial, esp32_chip_id, user_id, api_key, status)
+           VALUES (?, NULL, NULL, ?, 'unregistered')
+           ON DUPLICATE KEY UPDATE esp32_chip_id = NULL, user_id = NULL, api_key = VALUES(api_key), status = 'unregistered'`,
+          [nextDeviceSerialNumber, apiKey]
+        );
+        await pool.query(
+          'INSERT IGNORE INTO device_credentials (device_serial, api_key) VALUES (?, ?)',
+          [nextDeviceSerialNumber, apiKey]
+        );
+      } catch (deviceErr) {
+        console.warn('Pre-reserve device serial slot failed:', deviceErr.message);
+      }
     }
 
     if (safeRole === 'farmer' && (!nextFarmSize || !nextFarmLocation)) {

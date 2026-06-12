@@ -60,20 +60,40 @@ function isAdminLike(role) {
   return ['admin', 'supervisor'].includes(String(role || '').toLowerCase());
 }
 
-function formatDeviceSerialNumber(sequence) {
-  return `NT-${String(sequence).padStart(2, '0')}-TCL`;
+function generateApiKey() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < 48; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+  return result;
 }
 
-async function generateNextDeviceSerialNumber() {
-  const [rows] = await pool.query(`
-    SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number, '-', 2), '-', -1) AS UNSIGNED)) AS max_serial
-    FROM users
-    WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'
-  `);
+// Returns the next available serial: reuses freed slots (from deleted farmers) before
+// generating a new number, ensuring ascending order without gaps.
+async function reserveNextDeviceSerial() {
+  try {
+    const [freed] = await pool.query(`
+      SELECT device_serial FROM device_registrations
+      WHERE user_id IS NULL
+        AND (esp32_chip_id IS NULL OR esp32_chip_id = '')
+        AND status = 'unregistered'
+        AND device_serial REGEXP '^NT-[0-9]+-TCL$'
+      ORDER BY CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial, '-', 2), '-', -1) AS UNSIGNED) ASC
+      LIMIT 1
+    `);
+    if (freed.length > 0) return freed[0].device_serial;
+  } catch (_) { /* device_registrations table not yet created, fall through */ }
 
+  const [rows] = await pool.query(`
+    SELECT GREATEST(
+      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number,'-',2),'-',-1) AS UNSIGNED))
+                FROM users WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'), 0),
+      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial,'-',2),'-',-1) AS UNSIGNED))
+                FROM device_registrations WHERE device_serial REGEXP '^NT-[0-9]+-TCL$'), 0)
+    ) AS max_serial
+  `);
   const currentMax = Number(rows?.[0]?.max_serial);
-  const nextSequence = Number.isFinite(currentMax) ? currentMax + 1 : 1;
-  return formatDeviceSerialNumber(nextSequence);
+  const nextSeq = (Number.isFinite(currentMax) && currentMax > 0) ? currentMax + 1 : 1;
+  return `NT-${String(nextSeq).padStart(2, '0')}-TCL`;
 }
 
 async function ensureAuthSessionsSchema() {
@@ -177,9 +197,28 @@ router.post('/register', authMiddleware, async (req, res) => {
     const [uuidResult] = await pool.query('SELECT UUID() as uuid');
     const id = uuidResult[0].uuid;
     
-    const generatedDeviceSerialNumber = normalizedRole === 'farmer'
-      ? await generateNextDeviceSerialNumber()
-      : null;
+    // Reserve the serial slot in device_registrations BEFORE inserting the user,
+    // so the ESP32 can find and claim it via /request-serial on first boot.
+    let generatedDeviceSerialNumber = null;
+    if (normalizedRole === 'farmer') {
+      generatedDeviceSerialNumber = await reserveNextDeviceSerial();
+      const apiKey = generateApiKey();
+      try {
+        // INSERT or re-confirm a freed slot (ON DUPLICATE handles reused serials)
+        await pool.query(
+          `INSERT INTO device_registrations (device_serial, esp32_chip_id, user_id, api_key, status)
+           VALUES (?, NULL, NULL, ?, 'unregistered')
+           ON DUPLICATE KEY UPDATE esp32_chip_id = NULL, user_id = NULL, api_key = VALUES(api_key), status = 'unregistered'`,
+          [generatedDeviceSerialNumber, apiKey]
+        );
+        await pool.query(
+          'INSERT IGNORE INTO device_credentials (device_serial, api_key) VALUES (?, ?)',
+          [generatedDeviceSerialNumber, apiKey]
+        );
+      } catch (deviceErr) {
+        console.warn('Pre-reserve device serial slot failed:', deviceErr.message);
+      }
+    }
 
     // Insert user
     await pool.query(
@@ -198,7 +237,7 @@ router.post('/register', authMiddleware, async (req, res) => {
         generatedDeviceSerialNumber
       ]
     );
-    
+
     res.json({
       success: true,
       message: 'User registered successfully',
