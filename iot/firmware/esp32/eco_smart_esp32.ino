@@ -302,21 +302,33 @@ const unsigned long WIFI_WAIT_BEEP_MS = 120;
 
 // ====================== DATABASE & API CONFIG ======================
 const char* BACKEND_URL_TUNNEL = "https://tunga-chickens-ltd-farming.onrender.com";
-// LAN fallback is enabled as a backup when the online tunnel is unavailable.
-// Set BACKEND_LAN_TARGET to the actual local backend server IP on your LAN.
-// Do not rely on the WiFi gateway as a fallback target unless the backend is hosted there.
-const IPAddress BACKEND_LAN_TARGET(192, 168, 156, 199);
+const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
+// LAN fallback: uses mDNS hostname so the IP is resolved dynamically every time.
+// This means the ESP32 always finds the backend even when DHCP assigns a new IP.
+const char* BACKEND_LAN_HOST = "DESKTOP-DJNRQR0.local";
 const uint16_t BACKEND_LAN_PORT = 5000;
 const bool ENABLE_LAN_FALLBACK = true;
-const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
+
+// Resolves the LAN backend hostname via mDNS. Returns 0.0.0.0 if not reachable.
+IPAddress resolveLanHost() {
+  IPAddress resolved(0, 0, 0, 0);
+  if (WiFi.hostByName(BACKEND_LAN_HOST, resolved, 5000)) {
+    Serial.print("[LAN] Resolved "); Serial.print(BACKEND_LAN_HOST);
+    Serial.print(" -> "); Serial.println(resolved.toString());
+    return resolved;
+  }
+  Serial.print("[LAN] mDNS resolution failed for: "); Serial.println(BACKEND_LAN_HOST);
+  return IPAddress(0, 0, 0, 0);
+}
 
 size_t buildBackendTargets(BackendTarget* targets, size_t maxTargets) {
   size_t count = 0;
-
-  if (count < maxTargets && BACKEND_LAN_TARGET != IPAddress(0, 0, 0, 0)) {
-    targets[count++] = { BACKEND_LAN_TARGET, BACKEND_LAN_PORT };
+  if (count < maxTargets) {
+    IPAddress resolved = resolveLanHost();
+    if (resolved != IPAddress(0, 0, 0, 0)) {
+      targets[count++] = { resolved, BACKEND_LAN_PORT };
+    }
   }
-
   return count;
 }
 
@@ -583,8 +595,9 @@ bool checkServerConnectivityAfterGsm() {
     return false;
   }
 
-  // Then try explicit local backend target only.
-  if (BACKEND_LAN_TARGET != IPAddress(0, 0, 0, 0) && canConnectToBackend(BACKEND_LAN_TARGET, BACKEND_LAN_PORT)) {
+  // Then try LAN backend (resolve hostname each time so IP changes are handled).
+  IPAddress lanIp = resolveLanHost();
+  if (lanIp != IPAddress(0, 0, 0, 0) && canConnectToBackend(lanIp, BACKEND_LAN_PORT)) {
     return true;
   }
 
