@@ -443,7 +443,7 @@ router.post('/control', authMiddleware, async (req, res) => {
     const [commandResult] = await db.query(
       `INSERT INTO device_commands (device_id, command, relay, state, requested_by, created_at)
        VALUES (?, ?, ?, ?, ?, NOW())`,
-      [deviceId, command, relay || null, state ? 1 : 0, req.user?.id || 'system']
+      [deviceId, command, relay || null, state ? 1 : 0, req.user?.uid || req.user?.id || 'system']
     );
 
     // Broadcast control command via Socket.IO (for real-time feedback)
@@ -499,20 +499,23 @@ router.get('/control/:deviceId', async (req, res) => {
       });
     }
 
+    const unexecutedValue = 0;
+    const executedValue = 1;
+
     const [commands] = await db.query(
       `SELECT id, command, relay, state, created_at 
        FROM device_commands 
-       WHERE device_id = ? AND executed = 0
+       WHERE device_id = ? AND executed = ?
        ORDER BY created_at ASC
        LIMIT 10`,
-      [deviceId]
+      [deviceId, unexecutedValue]
     );
 
     if (commands.length > 0) {
       // Mark as executed
       await db.query(
-        `UPDATE device_commands SET executed = 1 WHERE device_id = ? AND executed = 0`,
-        [deviceId]
+        `UPDATE device_commands SET executed = ? WHERE device_id = ? AND executed = ?`,
+        [executedValue, deviceId, unexecutedValue]
       );
     }
 

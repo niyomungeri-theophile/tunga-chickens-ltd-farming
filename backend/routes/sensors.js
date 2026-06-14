@@ -150,6 +150,48 @@ function isAdminLike(role) {
   return ['admin', 'supervisor'].includes(String(role || '').toLowerCase());
 }
 
+function normalizeDecimal(value, defaultValue = 0) {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : defaultValue;
+}
+
+function normalizePowerPayload(power = {}) {
+  const source = String(power.source ?? power.power_source ?? 'SOLAR').trim().toUpperCase();
+  const normalizedSource = source.includes('GRID') ? 'GRID' : 'SOLAR';
+
+  const voltage = normalizeDecimal(power.voltage ?? power.voltage_dc ?? power.voltageDC ?? 0, 0);
+  let current = normalizeDecimal(power.current ?? power.current_dc ?? power.currentDC ?? 0, 0);
+  if (current > 50) {
+    // Convert mA to A for very large current values that are likely milliamps.
+    current = Number((current / 1000).toFixed(4));
+  }
+
+  const consumedKwh = normalizedSource === 'GRID'
+    ? normalizeDecimal(power.consumed_kWh ?? power.totalEnergy_kWh ?? power.grid_energy_kwh ?? 0, 0)
+    : 0;
+  const costRwf = normalizedSource === 'GRID'
+    ? normalizeDecimal(power.cost_RWF ?? power.costRwf ?? (consumedKwh * 300), 0)
+    : 0;
+  const costUsd = normalizedSource === 'GRID'
+    ? normalizeDecimal(power.cost_USD ?? power.costUsd ?? (costRwf / 1400), 0)
+    : 0;
+
+  return {
+    normalizedSource,
+    voltage,
+    current,
+    consumedKwh,
+    costRwf,
+    costUsd,
+    batteryPercent: normalizeDecimal(power.batteryLevel ?? power.battery_percent ?? power.batteryPercent ?? 95, 95),
+    batteryStatus: String(power.batteryStatus ?? power.battery_status ?? '').trim() || null,
+    energy_note: String(power.energy_note ?? power.energyNote ?? '').trim() || null
+  };
+}
+
 async function ensureSensorsSchema() {
   if (sensorsSchemaReady) return;
 
@@ -195,7 +237,6 @@ async function ensureSensorsSchema() {
       battery_percent INT DEFAULT 95,
       battery_status VARCHAR(20) NULL,
       energy_note VARCHAR(100) NULL,
-      UNIQUE INDEX ux_power_readings_device_id (device_id),
       INDEX idx_power_readings_user_id (user_id),
       INDEX idx_power_readings_device_serial (device_serial),
       INDEX idx_power_readings_reading_time (reading_time)
@@ -320,6 +361,15 @@ async function ensureSensorsSchema() {
         }
         throw error;
       }
+    }
+  }
+
+  // If a legacy unique index exists, remove it so multiple power readings can be stored per device.
+  try {
+    await pool.query('ALTER TABLE power_readings DROP INDEX ux_power_readings_device_id');
+  } catch (error) {
+    if (error.code !== 'ER_DROP_INDEX_SQL_ERROR' && error.code !== 'ER_KEY_DOES_NOT_EXIST' && error.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
+      throw error;
     }
   }
 
@@ -641,7 +691,7 @@ router.post('/update', async (req, res) => {
     }
     
     if (power) {
-      const normalizedSource = String(power.source || 'SOLAR').trim().toUpperCase().includes('GRID') ? 'GRID' : 'SOLAR';
+      const normalized = normalizePowerPayload(power);
 
       // Always store device serial for per-device tracking.
       const serialFromPayload = power.serialNumber || power.serial_number || power.deviceSerial || power.device_serial || null;
@@ -650,25 +700,10 @@ router.post('/update', async (req, res) => {
         try {
           const [rows] = await pool.query('SELECT device_serial_number FROM users WHERE id = ? LIMIT 1', [ownerUserId]);
           deviceSerial = rows?.[0]?.device_serial_number || null;
-        } catch (error) {
+        } catch (_error) {
           deviceSerial = null;
         }
       }
-
-      // Normalize current units: some devices send mA instead of A. If current > 50 assume mA and convert to A.
-      const rawCurrent = Number(power.current ?? power.current_dc ?? 0);
-      const normalizedCurrent = rawCurrent > 50 ? (rawCurrent / 1000.0) : rawCurrent;
-
-      // Compute cost fields server-side if not provided (300 RWF/kWh, 1 USD = 1400 RWF)
-      const consumedKwh = normalizedSource === 'GRID'
-        ? Number(power.consumed_kWh ?? power.totalEnergy_kWh ?? 0)
-        : 0;
-      const costRwf = normalizedSource === 'GRID'
-        ? Number(power.cost_RWF ?? (consumedKwh * 300))
-        : 0;
-      const costUsd = normalizedSource === 'GRID'
-        ? Number(power.cost_USD ?? (costRwf / 1400))
-        : 0;
 
       await pool.query(
         `INSERT INTO power_readings (
@@ -679,15 +714,15 @@ router.post('/update', async (req, res) => {
         [
           ownerUserId,
           deviceSerial,
-          normalizedSource,
-          Number(power.voltage ?? 13.2),
-          Number(normalizedCurrent || 0),
-          consumedKwh,
-          costRwf,
-          costUsd,
-          power.batteryLevel || 95,
-          power.batteryStatus || null,
-          power.energy_note || (normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
+          normalized.normalizedSource,
+          normalized.voltage,
+          normalized.current,
+          normalized.consumedKwh,
+          normalized.costRwf,
+          normalized.costUsd,
+          normalized.batteryPercent,
+          normalized.batteryStatus,
+          normalized.energy_note || (normalized.normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
         ]
       );
       await pruneTableToLatestRows(pool, 'power_readings');
@@ -822,23 +857,13 @@ router.post('/update-by-serial', async (req, res) => {
     if (Object.keys(gasPayload).length > 0) {
       await pool.query(
         'INSERT INTO gas_readings (user_id, co2, nh3, ch4, o2, lpg, h2s) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [ownerUserId, gasPayload.CO2 || 400, gasPayload.NH3 || 2, gasPayload.CH4 || 0, gasPayload.O2 || 21, gasLpg, gasH2S]
+        [ownerUserId, gasPayload.CO2 ?? 400, gasPayload.NH3 ?? 2, gasPayload.CH4 ?? 0, gasPayload.O2 ?? 21, gasLpg, gasH2S]
       );
       await pruneTableToLatestRows(pool, 'gas_readings');
     }
 
     if (power) {
-      const normalizedSource = String(power.source || 'SOLAR').trim().toUpperCase().includes('GRID') ? 'GRID' : 'SOLAR';
-
-      const consumedKwh = normalizedSource === 'GRID'
-        ? Number(power.consumed_kWh ?? power.totalEnergy_kWh ?? 0)
-        : 0;
-      const costRwf = normalizedSource === 'GRID'
-        ? Number(power.cost_RWF ?? (consumedKwh * 300))
-        : 0;
-      const costUsd = normalizedSource === 'GRID'
-        ? Number(power.cost_USD ?? (costRwf / 1400))
-        : 0;
+      const normalized = normalizePowerPayload(power);
 
       await pool.query(
         `INSERT INTO power_readings (
@@ -849,15 +874,15 @@ router.post('/update-by-serial', async (req, res) => {
         [
           ownerUserId,
           resolvedSerial,
-          normalizedSource,
-          power.voltage || 13.2,
-          power.current || 1.8,
-          consumedKwh,
-          costRwf,
-          costUsd,
-          power.batteryLevel || 95,
-          power.batteryStatus || null,
-          power.energy_note || (normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
+          normalized.normalizedSource,
+          normalized.voltage,
+          normalized.current,
+          normalized.consumedKwh,
+          normalized.costRwf,
+          normalized.costUsd,
+          normalized.batteryPercent,
+          normalized.batteryStatus,
+          normalized.energy_note || (normalized.normalizedSource === 'GRID' ? 'GRID USAGE' : 'FREE - Solar Active')
         ]
       );
       await pruneTableToLatestRows(pool, 'power_readings');
@@ -888,7 +913,11 @@ router.post('/update-by-serial', async (req, res) => {
     res.json({ success: true, message: 'Sensor data stored', userId: ownerUserId });
   } catch (error) {
     console.error('Update-by-serial error:', error);
-    res.status(500).json({ success: false, message: 'Failed to update sensor data' });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update sensor data',
+      ...(process.env.DEBUG_API_ERRORS === '1' ? { error: String(error.message || error) } : {})
+    });
   }
 });
 

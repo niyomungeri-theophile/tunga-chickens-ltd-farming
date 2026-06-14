@@ -388,8 +388,11 @@ const AppContent: React.FC = () => {
     const parts = token.split('.');
     if (parts.length < 2) return '';
     try {
-      const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-      const payload = JSON.parse(atob(normalized));
+      const normalized = parts[1]
+        .replace(/-/g, '+')
+        .replace(/_/g, '/');
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+      const payload = JSON.parse(atob(padded));
       return String(payload?.role || '').toLowerCase();
     } catch (_) {
       return '';

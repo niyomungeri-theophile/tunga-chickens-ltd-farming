@@ -229,14 +229,14 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
   const latestSampleAt = deviceLastSeen;
   const latestSampleLabel = formatRelativeTime(latestSampleAt, nowTick);
 
-  const displaySensors = (hasDataFlag && isOnlineFlag) ? {
+  const displaySensors = hasDataFlag ? {
     temperature: data.sensors?.temperature ?? 37.5,
     humidity:    data.sensors?.humidity    ?? 62,
     light_lux:   data.sensors?.light_lux   ?? 520
   } : { temperature: 0, humidity: 0, light_lux: 0 };
 
-  const displayGas   = (hasDataFlag && isOnlineFlag) ? (data.gas   ?? {}) : { CO2: 0, NH3: 0, CH4: 0, O2: 0, H2S: 0, LPG: 0 };
-  const displayPower = (hasDataFlag && isOnlineFlag) ? (data.power ?? {}) : { source: 'OFFLINE', voltage: 0, current: 0, totalEnergy_kWh: 0, consumed_kWh: 0, cost_rwf: 0, cost_usd: 0, batteryLevel: 0 };
+  const displayGas   = hasDataFlag ? (data.gas   ?? {}) : { CO2: 0, NH3: 0, CH4: 0, O2: 0, H2S: 0, LPG: 0 };
+  const displayPower = hasDataFlag ? (data.power ?? {}) : { source: 'OFFLINE', voltage: 0, current: 0, totalEnergy_kWh: 0, consumed_kWh: 0, cost_rwf: 0, cost_usd: 0, batteryLevel: 0 };
 
   const tempVal = Number(displaySensors.temperature);
   const humVal  = Number(displaySensors.humidity);

@@ -234,6 +234,9 @@ function createMysqlPool() {
     connectionLimit: 10,
     queueLimit: 0,
     decimalNumbers: true,
+    connectTimeout: 30000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
   });
 }
 

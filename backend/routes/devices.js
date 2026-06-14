@@ -232,17 +232,48 @@ function formatDeviceSerialNumber(sequence) {
 }
 
 async function generateNextDeviceSerialNumber() {
-  const [rows] = await pool.query(`
-    SELECT GREATEST(
-      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number,'-',2),'-',-1) AS UNSIGNED))
-                FROM users WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'), 0),
-      COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial,'-',2),'-',-1) AS UNSIGNED))
-                FROM device_registrations WHERE device_serial REGEXP '^NT-[0-9]+-TCL$'), 0)
-    ) AS max_serial
-  `);
-  const currentMax = Number(rows?.[0]?.max_serial);
-  const nextSeq = (Number.isFinite(currentMax) && currentMax > 0) ? currentMax + 1 : 1;
-  return formatDeviceSerialNumber(nextSeq);
+  // Use a dedicated sequence table and a transaction to ensure
+  // serial numbers are allocated atomically and without gaps
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // ensure sequence table exists
+    await conn.query(`CREATE TABLE IF NOT EXISTS device_serial_sequence (
+      id INT PRIMARY KEY,
+      last_seq INT NOT NULL
+    )`);
+
+    // try to lock the single sequence row
+    const [seqRows] = await conn.query('SELECT last_seq FROM device_serial_sequence WHERE id = 1 FOR UPDATE');
+    let nextSeq;
+    if (seqRows.length === 0) {
+      // initialize based on current maximum across users and registrations
+      const [rows] = await conn.query(`
+        SELECT GREATEST(
+          COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial_number,'-',2),'-',-1) AS UNSIGNED))
+                    FROM users WHERE device_serial_number REGEXP '^NT-[0-9]+-TCL$'), 0),
+          COALESCE((SELECT MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(device_serial,'-',2),'-',-1) AS UNSIGNED))
+                    FROM device_registrations WHERE device_serial REGEXP '^NT-[0-9]+-TCL$'), 0)
+        ) AS max_serial
+      `);
+      const currentMax = Number(rows?.[0]?.max_serial) || 0;
+      nextSeq = currentMax + 1 || 1;
+      await conn.query('INSERT INTO device_serial_sequence (id, last_seq) VALUES (1, ?)', [nextSeq]);
+    } else {
+      const lastSeq = Number(seqRows[0].last_seq) || 0;
+      nextSeq = lastSeq + 1;
+      await conn.query('UPDATE device_serial_sequence SET last_seq = ? WHERE id = 1', [nextSeq]);
+    }
+
+    await conn.commit();
+    return formatDeviceSerialNumber(nextSeq);
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 }
 
 // Sync a user's assigned device serial to the actual linked device record.
@@ -738,43 +769,6 @@ router.post('/admin/unassign', authMiddleware, async (req, res) => {
 
     if (!isAdminLike(req.user?.role)) {
 
-// Admin reset to restart device serial generation from NT-01-TCL.
-router.post('/admin/reset-serials', authMiddleware, async (req, res) => {
-  try {
-    await ensureDeviceSchema();
-
-    if (!isAdminLike(req.user?.role)) {
-      return res.status(403).json({ success: false, message: 'Admin only' });
-    }
-
-    const confirm = String(req.body?.confirm || '').trim().toUpperCase();
-    if (confirm !== 'RESET') {
-      return res.status(400).json({
-        success: false,
-        message: 'Confirmation required. Send confirm: "RESET" to clear device serials and restart numbering.'
-      });
-    }
-
-    const result = await resetDeviceSerialSequence();
-
-    if (io) {
-      io.emit('devices-reset', {
-        cleared: result.cleared,
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: 'Device serial sequence reset. The next generated serial will start at NT-01-TCL.',
-      cleared: result.cleared
-    });
-  } catch (error) {
-    console.error('Reset serials error:', error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-      return res.status(403).json({ success: false, message: 'Admin only' });
     }
 
     const deviceSerial = String(req.body?.device_serial || '').trim();
@@ -895,7 +889,7 @@ router.get('/my-device', authMiddleware, async (req, res) => {
   try {
     await ensureDeviceSchema();
 
-    const userId = req.user?.id;
+    const userId = req.user?.uid || req.user?.id;
     const [devices] = await pool.query(
       `SELECT id, device_serial, esp32_chip_id, device_mac_address, device_name, firmware_version, status, first_seen, last_seen, linked_at
        FROM device_registrations
@@ -956,10 +950,12 @@ router.post('/status', async (req, res) => {
 
     const device = devices[0];
     if (!device.user_id || !device.linked_user_exists) {
-      return res.status(403).json({
-        success: false,
+      // Device is known but not yet linked to a farmer account.
+      return res.json({
+        success: true,
         message: 'Device not linked to any account',
-        deviceBlocked: false
+        deviceBlocked: false,
+        registration_status: 'UNLINKED'
       });
     }
 
@@ -1084,7 +1080,7 @@ router.post('/link', authMiddleware, async (req, res) => {
 
     const deviceSerial = String(req.body?.deviceSerial || req.body?.device_serial || '').trim();
     const apiKey = String(req.body?.apiKey || req.body?.api_key || '').trim();
-    const userId = req.user?.id;
+    const userId = req.user?.uid || req.user?.id;
 
     if (!deviceSerial || !apiKey) {
       return res.status(400).json({ success: false, message: 'Missing deviceSerial or apiKey' });
@@ -1167,7 +1163,7 @@ router.get('/brooding/restore', deviceAuthMiddleware, async (req, res) => {
 router.get('/brooding/:deviceSerial', authMiddleware, async (req, res) => {
   try {
     const { deviceSerial } = req.params;
-    const userId = req.user?.id;
+    const userId = req.user?.uid || req.user?.id;
 
     if (!deviceSerial) {
       return res.status(400).json({ success: false, message: 'deviceSerial is required' });
@@ -1224,7 +1220,7 @@ router.post('/brooding/:deviceSerial/command', authMiddleware, async (req, res) 
   try {
     const { deviceSerial } = req.params;
     const { command } = req.body;  // 'start', 'stop', 'reset'
-    const userId = req.user?.id;
+    const userId = req.user?.uid || req.user?.id;
 
     if (!deviceSerial || !command) {
       return res.status(400).json({ success: false, message: 'deviceSerial and command are required' });
@@ -1256,7 +1252,7 @@ router.post('/brooding/:deviceSerial/command', authMiddleware, async (req, res) 
     await pool.query(
       `INSERT INTO device_commands (device_id, command, relay, state, requested_by, created_at)
        VALUES (?, ?, NULL, NULL, ?, NOW())`,
-      [device.id, command, req.user?.id || 'system']
+      [device.id, command, req.user?.uid || req.user?.id || 'system']
     );
 
     console.log(`[BROODING] Command '${command}' queued for device ${deviceSerial}`);
@@ -1294,12 +1290,15 @@ router.post('/brooding/status', async (req, res) => {
     }
 
     const deviceId = devices[0].id;
+    const unexecutedValue = 0;
+    const executedValue = 1;
+
     const [commands] = await pool.query(
       `SELECT id, command FROM device_commands
-       WHERE device_id = ? AND executed = 0
+       WHERE device_id = ? AND executed = ?
        ORDER BY created_at ASC
        LIMIT 1`,
-      [deviceId]
+      [deviceId, unexecutedValue]
     );
 
     if (commands.length === 0) {
@@ -1310,9 +1309,9 @@ router.post('/brooding/status', async (req, res) => {
     const pendingCommand = commands[0];
     await pool.query(
       `UPDATE device_commands
-       SET executed = 1, executed_at = NOW()
+       SET executed = ?, executed_at = NOW()
        WHERE id = ?`,
-      [pendingCommand.id]
+      [executedValue, pendingCommand.id]
     );
 
     console.log(`[BROODING] Returning command '${pendingCommand.command}' for device serial: ${device_serial}`);
