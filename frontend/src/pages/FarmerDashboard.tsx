@@ -430,7 +430,7 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
                 <>
                   <div className="flex flex-col items-center justify-center gap-4">
                     <button
-                      className={`grid place-items-center w-32 h-32 rounded-full text-black transition ${broodingActionPending ? 'opacity-70 cursor-not-allowed' : 'hover:scale-[1.02]'} ${(isActive || broodingIntendedCmd === 'stop') ? 'bg-[#ff3b3b] shadow-[0_0_40px_rgba(255,59,59,0.35)]' : 'bg-[#22ff22] shadow-[0_0_40px_rgba(34,255,34,0.35)]'}`}
+                      className={`grid place-items-center w-32 h-32 rounded-full text-black transition ${broodingActionPending ? 'opacity-70 cursor-not-allowed' : 'hover:scale-[1.02]'} ${(isActive || broodingIntendedCmd === 'start') ? 'bg-[#22ff22] shadow-[0_0_40px_rgba(34,255,34,0.35)]' : 'bg-[#ff3b3b] shadow-[0_0_40px_rgba(255,59,59,0.35)]'}`}
                       disabled={broodingActionPending}
                       onClick={async () => {
                         try {
@@ -468,16 +468,7 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
                     </div>
                   </div>
 
-                  <div className="mt-5 grid grid-cols-2 gap-3">
-                    <div className="rounded-xl border border-neon/15 bg-neon/5 p-3">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-neon-dark">Days Past</p>
-                      <p className="text-2xl font-black text-neon mt-1">{days}</p>
-                    </div>
-                    <div className="rounded-xl border border-neon/15 bg-neon/5 p-3">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-neon-dark">Week</p>
-                      <p className="text-2xl font-black text-neon mt-1">{week}</p>
-                    </div>
-                  </div>
+                
 
                   <div className="mt-5 grid grid-cols-2 gap-3">
                     <button

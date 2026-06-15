@@ -210,9 +210,9 @@ router.post('/register', authMiddleware, async (req, res) => {
         // INSERT or re-confirm a freed slot (ON DUPLICATE handles reused serials)
         await pool.query(
           `INSERT INTO device_registrations (device_serial, esp32_chip_id, user_id, api_key, status)
-           VALUES (?, NULL, NULL, ?, 'unregistered')
-           ON DUPLICATE KEY UPDATE esp32_chip_id = NULL, user_id = NULL, api_key = VALUES(api_key), status = 'unregistered'`,
-          [generatedDeviceSerialNumber, apiKey]
+           VALUES (?, NULL, ?, ?, 'registered')
+           ON DUPLICATE KEY UPDATE esp32_chip_id = NULL, user_id = VALUES(user_id), api_key = VALUES(api_key), status = 'registered'`,
+          [generatedDeviceSerialNumber, id, apiKey]
         );
         await pool.query(
           'INSERT IGNORE INTO device_credentials (device_serial, api_key) VALUES (?, ?)',
@@ -293,6 +293,50 @@ router.post('/register-customer', async (req, res) => {
   } catch (error) {
     console.error('Customer registration error:', error);
     res.status(500).json({ success: false, message: 'An unexpected error occurred.' });
+  }
+});
+
+// Admin: preview next available device serial without reserving it
+router.get('/admin/next-serial', authMiddleware, async (req, res) => {
+  try {
+    if (!isAdminLike(req.user?.role)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+    await ensureUsersStatusSchema();
+    const nextSerial = await reserveNextDeviceSerial();
+    return res.json({ success: true, nextSerial });
+  } catch (error) {
+    console.error('Get next-serial error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to compute next serial' });
+  }
+});
+
+// Admin: reserve the next available device serial immediately
+router.post('/admin/reserve-next-serial', authMiddleware, async (req, res) => {
+  try {
+    if (!isAdminLike(req.user?.role)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+    await ensureUsersStatusSchema();
+
+    const nextSerial = await reserveNextDeviceSerial();
+    const apiKey = generateApiKey();
+
+    await pool.query(
+      `INSERT INTO device_registrations (device_serial, esp32_chip_id, user_id, api_key, status)
+       VALUES (?, NULL, NULL, ?, 'unregistered')
+       ON DUPLICATE KEY UPDATE api_key = VALUES(api_key), status = 'unregistered'`,
+      [nextSerial, apiKey]
+    );
+    await pool.query(
+      'INSERT IGNORE INTO device_credentials (device_serial, api_key) VALUES (?, ?)',
+      [nextSerial, apiKey]
+    );
+
+    return res.json({ success: true, reservedSerial: nextSerial });
+  } catch (error) {
+    console.error('Reserve next-serial error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to reserve next serial' });
   }
 });
 

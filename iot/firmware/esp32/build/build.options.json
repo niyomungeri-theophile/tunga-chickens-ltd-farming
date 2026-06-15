@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:esp32",
+  "hardwareFolders": "C:\\Users\\Theophile\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.3,C:\\Users\\Theophile\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.3",
+  "otherLibrariesFolders": "C:\\Users\\Theophile\\Documents\\Arduino\\libraries",
+  "sketchLocation": "C:\\Users\\Theophile\\Desktop\\tunga-chickens-ltd-farming\\iot\\firmware\\esp32\\temp-eco_smart_esp32"
+}

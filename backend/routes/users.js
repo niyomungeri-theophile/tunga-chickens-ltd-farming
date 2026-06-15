@@ -451,9 +451,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
       try {
         await pool.query(
           `INSERT INTO device_registrations (device_serial, esp32_chip_id, user_id, api_key, status)
-           VALUES (?, NULL, NULL, ?, 'unregistered')
-           ON DUPLICATE KEY UPDATE esp32_chip_id = NULL, user_id = NULL, api_key = VALUES(api_key), status = 'unregistered'`,
-          [nextDeviceSerialNumber, apiKey]
+           VALUES (?, NULL, ?, ?, 'registered')
+           ON DUPLICATE KEY UPDATE esp32_chip_id = NULL, user_id = VALUES(user_id), api_key = VALUES(api_key), status = 'registered'`,
+          [nextDeviceSerialNumber, req.params.id, apiKey]
         );
         await pool.query(
           'INSERT IGNORE INTO device_credentials (device_serial, api_key) VALUES (?, ?)',

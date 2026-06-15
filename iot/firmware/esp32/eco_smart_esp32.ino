@@ -98,6 +98,7 @@ const uint8_t RELAY_OFF = HIGH;
 
 // Forward declarations for functions used before their definitions
 void notifyBeforeLocking(const String& reason);
+void readStartButton();
 
 // ====================== DS18B20 SETUP ======================
 OneWire oneWire(PIN_DS18B20);
@@ -159,6 +160,12 @@ const unsigned long ALERT_SMS_SECONDARY_DELAY = 240000; // 4 minutes before seco
 // to an active alert that triggers GSM calls. This allows temporary spikes
 // to settle (e.g., cooling) and avoids immediate calls for transient warnings.
 const unsigned long ALERT_CONFIRMATION_MS = 60000; // 60s confirmation
+
+// Sensor failure escalation (immediate call+SMS to PHONE_1, then PHONE_2 after delay)
+bool sensorFailureAlertActive = false;
+unsigned long sensorFailureAlertStart = 0;
+unsigned long sensorFailureLastAction = 0;
+int sensorFailureAlertStage = 0; // 0=idle,1=notified primary,2=notified secondary
 
 // Candidate issue tracking while waiting for confirmation
 String candidateIssueType = "";
@@ -278,6 +285,7 @@ float oxygenPercent = 20.95;
 unsigned long lastMQRead = 0, lastDHTRead = 0, lastPowerRead = 0;
 unsigned long lastSerialPrint = 0, lastDangerCheck = 0;
 unsigned long lastWiFiRetry = 0;
+unsigned long lastWiFiAvailabilityCheck = 0;
 
 const unsigned long MQ_INTERVAL = 2000;
 const unsigned long DHT_INTERVAL = 3000;
@@ -285,6 +293,7 @@ const unsigned long POWER_INTERVAL = 1500;
 const unsigned long SERIAL_INTERVAL = 5000;
 const unsigned long DANGER_INTERVAL = 1000;
 const unsigned long WIFI_RETRY_INTERVAL = 30000;
+const unsigned long WIFI_AVAILABILITY_CHECK_INTERVAL = 500;  // Check every 5 seconds if WiFi is available
 const unsigned long LCD_DISPLAY_HOLD_MS = 2000;
 
 int displayState = 0;
@@ -324,6 +333,8 @@ bool wifiWaitAlertActive = false;
 unsigned long lastWifiWaitAlertTime = 0;
 const unsigned long WIFI_WAIT_ALERT_INTERVAL = 900;
 const unsigned long WIFI_WAIT_BEEP_MS = 120;
+unsigned long lastWiFiFailureBeepTime = 0;
+const unsigned long WIFI_FAILURE_BEEP_INTERVAL = 2000;
 
 // ====================== DATABASE & API CONFIG ======================
 const char* BACKEND_URL_TUNNEL = "https://tunga-chickens-ltd-farming.onrender.com";
@@ -336,6 +347,11 @@ const bool ENABLE_LAN_FALLBACK = true;
 // MAC address cannot be used directly for HTTP requests.
 const char* BACKEND_LAN_HOST = "192.168.69.199";
 const char* BACKEND_TUNNEL_HOST = "tunga-chickens-ltd-farming.onrender.com";
+// When true, the ESP32 will only contact the local LAN backend (gateway or
+// BACKEND_LAN_HOST) and will NOT attempt the public tunnel/HTTPS endpoint.
+// Use this for local-only deployments where the database/backend runs on the
+// same LAN as the ESP32.
+const bool FORCE_LOCAL_ONLY = true;
 
 // ====================== STATIC IP CONFIG ======================
 IPAddress ESP32_STATIC_IP(192, 168, 69, 200); // choose a free address in your LAN range
@@ -1132,7 +1148,11 @@ void requestDeviceSerialFromBackend() {
   Serial.println(WiFi.gatewayIP());
   Serial.print("Subnet: ");
   Serial.println(WiFi.subnetMask());
-  String chipId = String((uint32_t)ESP.getEfuseMac(), HEX);
+  uint64_t efuseMac = ESP.getEfuseMac();
+  char chipIdBuf[13];
+  snprintf(chipIdBuf, sizeof(chipIdBuf), "%04x%08x",
+           (uint32_t)(efuseMac >> 32), (uint32_t)(efuseMac));
+  String chipId = String(chipIdBuf);
   Serial.print("Chip ID: ");
   Serial.println(chipId);
 
@@ -1150,59 +1170,63 @@ void requestDeviceSerialFromBackend() {
   String response;
   String tunnelUrl = String(BACKEND_URL_TUNNEL) + String(SERIAL_REQUEST_ENDPOINT);
 
-  if (millis() < tunnelUnavailableUntil) {
-    if (testTcpConnectToHost(BACKEND_TUNNEL_HOST, 443, 10000)) {
-      logInfo("Tunnel is reachable again; clearing cooldown and retrying tunnel request");
-      tunnelUnavailableUntil = 0;
+  if (!FORCE_LOCAL_ONLY) {
+    if (millis() < tunnelUnavailableUntil) {
+      if (testTcpConnectToHost(BACKEND_TUNNEL_HOST, 443, 10000)) {
+        logInfo("Tunnel is reachable again; clearing cooldown and retrying tunnel request");
+        tunnelUnavailableUntil = 0;
+      }
     }
-  }
 
-  if (!(millis() < tunnelUnavailableUntil)) {
-    String response_tunnel;
-    int tunnelCode = postJsonRequest(tunnelUrl, payload, response_tunnel);
-    if (tunnelCode == 200) {
-      DynamicJsonDocument tunnelDoc(512);
-      DeserializationError tunnelError = deserializeJson(tunnelDoc, response_tunnel);
-      if (!tunnelError && tunnelDoc["success"].as<bool>()) {
-        String receivedSerial = tunnelDoc["device_serial"].as<String>();
-        String receivedUserId = tunnelDoc["user_id"].as<String>();
-        String receivedApiKey = tunnelDoc["api_key"].as<String>();
-        bool hasValidUserId = isValidAssignedUserId(receivedUserId);
-        if (receivedSerial.length() > 0) {
-          if (hasValidUserId) {
-            clearAndPrepareForNewAssignment(receivedSerial, receivedUserId, receivedApiKey);
-          } else {
-            prepareUnassignedSerial(receivedSerial, receivedApiKey);
-          }
-          hasRequestedSerialFromBackend = true;
-          
-          if (hasValidUserId) {
-            if (wifiConnected) {
-              logInfo("Attempting immediate data send after assignment...");
-              sendSensorDataToDatabase();
+    if (!(millis() < tunnelUnavailableUntil)) {
+      String response_tunnel;
+      int tunnelCode = postJsonRequest(tunnelUrl, payload, response_tunnel);
+      if (tunnelCode == 200) {
+        DynamicJsonDocument tunnelDoc(1024);
+        DeserializationError tunnelError = deserializeJson(tunnelDoc, response_tunnel);
+        if (!tunnelError && tunnelDoc["success"].as<bool>()) {
+          String receivedSerial = tunnelDoc["device_serial"].as<String>();
+          String receivedUserId = tunnelDoc["user_id"].as<String>();
+          String receivedApiKey = tunnelDoc["api_key"].as<String>();
+          bool hasValidUserId = isValidAssignedUserId(receivedUserId);
+          if (receivedSerial.length() > 0) {
+            if (hasValidUserId) {
+              clearAndPrepareForNewAssignment(receivedSerial, receivedUserId, receivedApiKey);
+            } else {
+              prepareUnassignedSerial(receivedSerial, receivedApiKey);
             }
-            logInfo("Provisioning complete: assignment confirmed and EEPROM saved");
+            hasRequestedSerialFromBackend = true;
+
+            if (hasValidUserId) {
+              if (wifiConnected) {
+                logInfo("Attempting immediate data send after assignment...");
+                sendSensorDataToDatabase();
+              }
+              logInfo("Provisioning complete: assignment confirmed and EEPROM saved");
+              lastSerialRequestTime = millis();
+              return;
+            } else {
+              deviceAssigned = false;
+              provisioningComplete = false;
+              logWarn("Device serial obtained but NOT assigned to a user yet.");
+              logInfo("Waiting for admin to assign...");
+            }
             lastSerialRequestTime = millis();
             return;
-          } else {
-            deviceAssigned = false;
-            provisioningComplete = false;
-            logWarn("Device serial obtained but NOT assigned to a user yet.");
-            logInfo("Waiting for admin to assign...");
           }
-          lastSerialRequestTime = millis();
-          return;
+        }
+      } else {
+        logWarn(String("Tunnel HTTP error: ") + String(tunnelCode));
+        if (tunnelCode == 400 || tunnelCode == 503) {
+          logWarn("Render may be waking up or sending invalid payload; retrying sooner");
+          tunnelUnavailableUntil = millis() + 60000;
+        } else {
+          tunnelUnavailableUntil = millis() + TUNNEL_DOWN_COOLDOWN;
         }
       }
-    } else {
-      logWarn(String("Tunnel HTTP error: ") + String(tunnelCode));
-      if (tunnelCode == 400 || tunnelCode == 503) {
-        logWarn("Render may be waking up or sending invalid payload; retrying sooner");
-        tunnelUnavailableUntil = millis() + 60000;
-      } else {
-        tunnelUnavailableUntil = millis() + TUNNEL_DOWN_COOLDOWN;
-      }
     }
+  } else {
+    logInfo("FORCE_LOCAL_ONLY is enabled — skipping tunnel/cloud backend request");
   }
 
   BackendTarget targets[2];
@@ -1233,7 +1257,7 @@ void requestDeviceSerialFromBackend() {
     int httpCode = postJsonRequest(url, payload, response);
 
     if (httpCode == 200) {
-      DynamicJsonDocument responseDoc(512);
+      DynamicJsonDocument responseDoc(1024);
       DeserializationError jsonError = deserializeJson(responseDoc, response);
       if (jsonError) {
         Serial.print("[ERROR] JSON parse failed: ");
@@ -1678,7 +1702,7 @@ void readDS18B20() {
   
   if (currentTime - lastDS18B20Read >= DS18B20_INTERVAL) {
     ds18b20.requestTemperatures();
-  smartDelay(100);
+    smartDelay(100);
     float temp = ds18b20.getTempC(ds18b20Address);
     
     if (temp != DEVICE_DISCONNECTED_C && temp > -55 && temp < 125) {
@@ -1700,27 +1724,34 @@ void readDS18B20() {
   }
 }
 
+bool isInManualStartSettling() {
+  return settlingUntil != 0 && millis() < settlingUntil;
+}
+
 // ====================== ERROR DETECTION & INDICATION ======================
 void checkAndUpdatePersistentIndication() {
   float currentTemp = (ds18b20Found && temperatureDS18B20 != 0) ? temperatureDS18B20 : temperatureDHT;
   int errorCount = 0;
+  bool manualSettling = isInManualStartSettling() && bloodingEnabled;
   
   if (!ds18b20Found) errorCount++;
   if (!dhtFound) errorCount++;
   
-  if (ds18b20Found && currentTemp > 0) {
-    if (currentTemp < TEMP_DANGER_MIN || currentTemp >= TEMP_DANGER_MAX) errorCount++;
-    else if (currentTemp < TEMP_GOOD_MIN || currentTemp > TEMP_GOOD_MAX) errorCount++;
+  if (!manualSettling) {
+    if (ds18b20Found && currentTemp > 0) {
+      if (currentTemp < TEMP_DANGER_MIN || currentTemp >= TEMP_DANGER_MAX) errorCount++;
+      else if (currentTemp < TEMP_GOOD_MIN || currentTemp > TEMP_GOOD_MAX) errorCount++;
+    }
+    
+    if (ppmCO2 > CO2_DANGER) errorCount++;
+    else if (ppmCO2 > CO2_GOOD_MAX) errorCount++;
+    
+    if (ppmNH3 > NH3_DANGER) errorCount++;
+    else if (ppmNH3 > NH3_GOOD_MAX) errorCount++;
+    
+    if (ppmLPG > LPG_DANGER) errorCount++;
+    else if (ppmLPG > LPG_GOOD_MAX) errorCount++;
   }
-  
-  if (ppmCO2 > CO2_DANGER) errorCount++;
-  else if (ppmCO2 > CO2_GOOD_MAX) errorCount++;
-  
-  if (ppmNH3 > NH3_DANGER) errorCount++;
-  else if (ppmNH3 > NH3_GOOD_MAX) errorCount++;
-  
-  if (ppmLPG > LPG_DANGER) errorCount++;
-  else if (ppmLPG > LPG_GOOD_MAX) errorCount++;
   
   if (errorCount > 0) {
     if (!hasActiveIssue) {
@@ -1807,17 +1838,49 @@ void systemReadyBeep() {
   shortBeep(1500, 250);
 }
 
-void wifiSuccessBeep() {
-  shortBeep(1200, 120);
-  smartDelay(60);
-  shortBeep(1700, 160);
+void smsSentBeep() {
+  // SMS sent successfully: 3 beeps
+  for (int i = 0; i < 3; i++) {
+    shortBeep(1200, 180);
+    smartDelay(150);
+  }
 }
 
-// Single disconnect beep: 1 second tone
+void incomingCallAlertBeep() {
+  // Incoming call alert: 3 fast beeps
+  for (int i = 0; i < 3; i++) {
+    shortBeep(2000, 150);
+    smartDelay(100);
+  }
+}
+
+void wifiSuccessBeep() {
+  // WiFi successfully connected: 3 beeps
+  for (int i = 0; i < 3; i++) {
+    shortBeep(1500, 200);
+    smartDelay(100);
+  }
+}
+
+// WiFi disconnect beep: alternating tones
 void wifiDisconnectBeep() {
   shortBeep(700, 140);
   smartDelay(80);
   shortBeep(500, 220);
+}
+
+void wifiFailureBeepTick() {
+  if (wifiConnected) {
+    return;  // Stop beeping if WiFi is now connected
+  }
+  
+  unsigned long now = millis();
+  if (now - lastWiFiFailureBeepTime >= WIFI_FAILURE_BEEP_INTERVAL) {
+    // 2-second interval beep while WiFi is disconnected
+    shortBeep(800, 300);  // Longer beep for disconnection alert
+    lastWiFiFailureBeepTime = now;
+    Serial.println("[BEEPER] WiFi failure beep");
+  }
 }
 
 void gsmReadyBeep() {
@@ -2052,7 +2115,7 @@ void sendSensorDataToDatabase() {
     return;
   }
   
-  Serial.println("\n=== SENDING DATA TO DATABASE ===");
+  Serial.println("\n=== SENDING DATA TO DATABASE (LOCAL FIRST, THEN ONLINE) ===");
   String payload = createSensorPayload();
   Serial.print("Payload: ");
   Serial.println(payload);
@@ -2064,44 +2127,13 @@ void sendSensorDataToDatabase() {
   bool lanSent    = false;
   bool online404  = false;
 
-  // ── 1. Online backend (Render / HTTPS) — always attempted ──────────────
-  String response;
-  String tunnelUrl = String(BACKEND_URL_TUNNEL) + String(API_ENDPOINT);
-  if (verboseSendNext) {
-    Serial.print("[SEND-DEBUG] (Online) x-device-serial: "); Serial.println(DEVICE_SERIAL);
-    Serial.print("[SEND-DEBUG] (Online) x-api-key (masked): "); Serial.println(maskApiKey(API_KEY));
-  }
-  int tunnelCode = postJsonRequest(tunnelUrl, payload, response);
-  if (verboseSendNext) {
-    Serial.print("[SEND-DEBUG] Online response body: "); Serial.println(response);
-  }
-  if (tunnelCode == 200) {
-    onlineSent = true;
-    Serial.println("[✓ ONLINE] Data sent successfully to online database (Render)");
-  } else if (tunnelCode == 404) {
-    online404 = true;
-    Serial.println("[✗ ONLINE 404] Device serial '" + DEVICE_SERIAL + "' not found on backend");
-    Serial.println("[DEBUG] Remote registration missing or api_key mismatch");
-  } else if (tunnelCode == 403) {
-    Serial.println("[✗ ONLINE 403] Device unauthorized - x-api-key failed auth");
-    Serial.println("[DEBUG] Serial: " + DEVICE_SERIAL + " | API Key: " + (API_KEY.length() > 0 ? "present" : "MISSING"));
-    if (API_KEY.length() > 0) {
-      Serial.println("[ACTION] Verify backend device_registrations.api_key for this serial or re-provision with SHOW CREDENTIALS / CLEAR EEPROM / REQUEST SERIAL.");
-    } else {
-      Serial.println("[ACTION] Set device API key in device_registrations and persist it on the ESP32.");
-    }
-  } else if (tunnelCode == -1) {
-    Serial.println("[⚠ ONLINE] Connection timeout to online backend (Render may be starting)");
-  } else {
-    Serial.printf("[⚠ ONLINE] HTTP %d - retrying in next cycle\n", tunnelCode);
-  }
-
-  // ── 2. Local database (LAN) — always attempted, not just as fallback ───
+  // ── 1. Try Local Backend (LAN) FIRST ─────────────────────────────────
   if (ENABLE_LAN_FALLBACK) {
     BackendTarget targets[2];
     const size_t targetCount = buildBackendTargets(targets, 2);
 
     for (size_t i = 0; i < targetCount; i++) {
+      Serial.println("\n[LAN ATTEMPT] Trying local backend...");
       Serial.print("[NET] Local subnet: "); Serial.println(localIp);
       Serial.print("[NET] LAN target:   "); Serial.println(targets[i].host);
 
@@ -2110,7 +2142,7 @@ void sendSensorDataToDatabase() {
       }
 
       if (!canConnectToBackend(targets[i].host, targets[i].port)) {
-        Serial.println("[WARN] LAN TCP connection failed before HTTP request");
+        Serial.println("[WARN] LAN TCP connection failed - trying next target or online fallback");
         continue;
       }
 
@@ -2127,23 +2159,58 @@ void sendSensorDataToDatabase() {
 
       if (lanCode == 200) {
         lanSent = true;
-        Serial.println("[✓ LAN] Data sent successfully to local database");
-        break;
+        Serial.println("[✓ LAN SUCCESS] Data sent successfully to local database");
+        break;  // LAN succeeded, no need to try more LAN targets
       } else if (lanCode == 404) {
         Serial.println("[✗ LAN 404] Device serial '" + DEVICE_SERIAL + "' not found on LAN backend");
-        if (!onlineSent) {
-          needsSerialVerification = true;
-        }
+        // Will try online fallback
       } else if (lanCode == 403) {
         Serial.println("[✗ LAN 403] Device unauthorized on LAN backend");
       } else if (lanCode == -1) {
-        Serial.println("[⚠ LAN] Connection timeout to: " + targets[i].host.toString() + ":" + String(targets[i].port));
+        Serial.println("[⚠ LAN TIMEOUT] Connection timeout to: " + targets[i].host.toString() + ":" + String(targets[i].port));
       } else {
-        Serial.printf("[⚠ LAN] HTTP %d - will retry next cycle\n", lanCode);
+        Serial.printf("[⚠ LAN] HTTP %d - will try online fallback\n", lanCode);
       }
     }
   } else {
-    Serial.println("[NET] LAN target not configured or fallback disabled");
+    Serial.println("[INFO] LAN fallback disabled - skipping local backend");
+  }
+
+  // ── 2. Online Backend (Render / HTTPS) — FALLBACK if LAN failed ───────
+  if (!lanSent) {
+    Serial.println("\n[ONLINE FALLBACK] LAN unavailable or failed - trying online backend...");
+    String response;
+    String tunnelUrl = String(BACKEND_URL_TUNNEL) + String(API_ENDPOINT);
+    if (verboseSendNext) {
+      Serial.print("[SEND-DEBUG] (Online) x-device-serial: "); Serial.println(DEVICE_SERIAL);
+      Serial.print("[SEND-DEBUG] (Online) x-api-key (masked): "); Serial.println(maskApiKey(API_KEY));
+    }
+    int tunnelCode = postJsonRequest(tunnelUrl, payload, response);
+    if (verboseSendNext) {
+      Serial.print("[SEND-DEBUG] Online response body: "); Serial.println(response);
+    }
+    if (tunnelCode == 200) {
+      onlineSent = true;
+      Serial.println("[✓ ONLINE SUCCESS] Data sent successfully to online database (Render)");
+    } else if (tunnelCode == 404) {
+      online404 = true;
+      Serial.println("[✗ ONLINE 404] Device serial '" + DEVICE_SERIAL + "' not found on backend");
+      Serial.println("[DEBUG] Remote registration missing or api_key mismatch");
+    } else if (tunnelCode == 403) {
+      Serial.println("[✗ ONLINE 403] Device unauthorized - x-api-key failed auth");
+      Serial.println("[DEBUG] Serial: " + DEVICE_SERIAL + " | API Key: " + (API_KEY.length() > 0 ? "present" : "MISSING"));
+      if (API_KEY.length() > 0) {
+        Serial.println("[ACTION] Verify backend device_registrations.api_key for this serial or re-provision with SHOW CREDENTIALS / CLEAR EEPROM / REQUEST SERIAL.");
+      } else {
+        Serial.println("[ACTION] Set device API key in device_registrations and persist it on the ESP32.");
+      }
+    } else if (tunnelCode == -1) {
+      Serial.println("[⚠ ONLINE TIMEOUT] Connection timeout to online backend (Render may be starting)");
+    } else {
+      Serial.printf("[⚠ ONLINE] HTTP %d - retrying in next cycle\n", tunnelCode);
+    }
+  } else {
+    Serial.println("[INFO] Local backend succeeded - skipping online check to save bandwidth");
   }
 
   // ── 3. Update shared state based on combined result ────────────────────
@@ -2156,9 +2223,9 @@ void sendSensorDataToDatabase() {
     lastDatabaseSendSuccess     = true;
     lastDatabaseSendTimestamp   = currentTime;
 
-    if (onlineSent && lanSent)       lastDatabaseSendMessage = "Online+LAN: OK";
-    else if (onlineSent)             lastDatabaseSendMessage = "Online: OK (LAN unreachable)";
-    else                             lastDatabaseSendMessage = "LAN: OK (Online unreachable)";
+    if (lanSent && onlineSent)       lastDatabaseSendMessage = "LAN+Online: OK";
+    else if (lanSent)                lastDatabaseSendMessage = "LAN: OK (Local first)";
+    else                             lastDatabaseSendMessage = "Online: OK (LAN unavailable)";
 
     if (online404 && lanSent) {
       Serial.println("[WARN] Online backend 404 but LAN succeeded — keeping device active on LAN");
@@ -2176,7 +2243,7 @@ void sendSensorDataToDatabase() {
     lastDatabaseSendSuccess   = false;
     lastDatabaseSendMessage   = "All routes failed";
     lastDatabaseSendTimestamp = currentTime;
-    Serial.println("[ERROR] Failed to send to any backend (online + LAN both unreachable)");
+    Serial.println("[ERROR] Failed to send to any backend (local + online both unreachable)");
     Serial.print("Failure count: "); Serial.println(databaseSendFailCount);
 
     notifyDatabaseConnectionIssueOnce();
@@ -2355,7 +2422,7 @@ void connectToWiFi() {
     }
   }
   
-  Serial.println("\n=== Scanning for WiFi Networks ===");
+  Serial.println("\n=== Scanning for WiFi Networks (Trying Each Network - 5sec timeout) ===");
   
   int n = WiFi.scanNetworks();
   if (n == 0) {
@@ -2367,88 +2434,123 @@ void connectToWiFi() {
     return;
   }
   
+  Serial.printf("Found %d networks - will try each with 5-second timeout\n", n);
+  
+  // Try ALL networks (3 networks) - each gets 5 seconds
   for (int netIndex = 0; netIndex < 3; netIndex++) {
+    bool networkFound = false;
+    int signalStrength = 0;
+    
+    // Find this network in scan results
     for (int i = 0; i < n; i++) {
       if (WiFi.SSID(i) == networks[netIndex].ssid) {
-        Serial.printf("\nAttempting to connect to: %s\n", networks[netIndex].ssid);
+        networkFound = true;
+        signalStrength = WiFi.RSSI(i);
+        break;
+      }
+    }
+    
+    if (!networkFound) {
+      Serial.printf("[VERIFY %d/3] Network '%s' not found in scan - skipping\n", netIndex + 1, networks[netIndex].ssid);
+      continue;
+    }
+    
+    Serial.printf("\n[VERIFY %d/3] Attempting connection to: %s\n", netIndex + 1, networks[netIndex].ssid);
+    Serial.printf("Signal: %d dBm | Timeout: 5 seconds\n", signalStrength);
+    
+    lcd.clear();
+    lcd.setCursor(0,0); lcd.print("WiFi Verifying...");
+    lcd.setCursor(0,1); lcd.print("SSID: ");
+    lcd.print(networks[netIndex].ssid);
+    lcd.setCursor(0,2); lcd.print("Signal: ");
+    lcd.print(signalStrength);
+    lcd.print(" dBm");
+    lcd.setCursor(0,3); lcd.print("Counting: 5 sec");
+    
+    WiFi.begin(networks[netIndex].ssid, networks[netIndex].password);
+    
+    unsigned long startTime = millis();
+    int countdownSec = 5;
+    unsigned long lastCountdownUpdate = startTime;
+    
+    while (millis() - startTime < 5000) {  // 5-second timeout per network
+      readStartButton();
+      
+      // Update countdown display every second
+      if (millis() - lastCountdownUpdate >= 1000) {
+        countdownSec--;
+        Serial.printf("[VERIFY %d/3] %d seconds remaining...\n", netIndex + 1, countdownSec);
+        lastCountdownUpdate = millis();
+        
+        lcd.setCursor(0,3);
+        lcd.print("Counting: ");
+        lcd.print(countdownSec);
+        lcd.print(" sec");
+      }
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        wifiConnected = true;
+        wifiReconnectLocked = false;
+        wifiConnectionAlertSent = false;
+        WiFi.setSleep(false);
+        Serial.printf("\n✓ [VERIFY SUCCESS] Network %d/3 '%s' connected!\n", netIndex + 1, networks[netIndex].ssid);
+        Serial.printf("[WiFi] Connected IP: %s (expected: %s)\n",
+                      WiFi.localIP().toString().c_str(),
+                      ESP32_STATIC_IP.toString().c_str());
+        Serial.print("Subnet Mask: ");
+        Serial.println(WiFi.subnetMask());
+        Serial.print("Gateway IP: ");
+        Serial.println(WiFi.gatewayIP());
+        Serial.print("RSSI: ");
+        Serial.println(WiFi.RSSI());
         
         lcd.clear();
-        lcd.setCursor(0,0); lcd.print("WiFi Connecting...");
+        lcd.setCursor(0,0); lcd.print("✓ Connected!");
         lcd.setCursor(0,1); lcd.print("SSID: ");
         lcd.print(networks[netIndex].ssid);
-        lcd.setCursor(0,2); lcd.print("Signal: ");
-        lcd.print(WiFi.RSSI(i));
-        lcd.print(" dBm");
-        lcd.setCursor(0,3); lcd.print("Please wait...");
-        
-        WiFi.begin(networks[netIndex].ssid, networks[netIndex].password);
-        
-        unsigned long startTime = millis();
-        while (millis() - startTime < 15000) {
-          readStartButton();
-          if (WiFi.status() == WL_CONNECTED) {
-            wifiConnected = true;
-            wifiReconnectLocked = false;
-            wifiConnectionAlertSent = false;
-            WiFi.setSleep(false);
-            Serial.println("WiFi Connected Successfully!");
-            Serial.printf("[WiFi] Connected IP: %s (expected: %s)\n",
-                          WiFi.localIP().toString().c_str(),
-                          ESP32_STATIC_IP.toString().c_str());
-            Serial.print("Subnet Mask: ");
-            Serial.println(WiFi.subnetMask());
-            Serial.print("Gateway IP: ");
-            Serial.println(WiFi.gatewayIP());
-            Serial.print("RSSI: ");
-            Serial.println(WiFi.RSSI());
-            
-            lcd.clear();
-            lcd.setCursor(0,0); lcd.print("WiFi Connected!");
-            lcd.setCursor(0,1); lcd.print("SSID: ");
-            lcd.print(networks[netIndex].ssid);
-            lcd.setCursor(0,2); lcd.print("IP: ");
-            lcd.print(WiFi.localIP());
-            lcd.setCursor(0,3); lcd.print("Ready!");
-            smartDelay(2000);
-            
-            flashWiFiConnectedIndicator();
-            wifiSuccessBeep();
-            WiFi.scanDelete();
-            return;
-          }
-          wifiWaitingAlertTick();
-          smartDelay(250);
-        }
-        
-        Serial.printf("Failed to connect to %s\n", networks[netIndex].ssid);
-        WiFi.scanDelete();
-        notifyWiFiConnectionIssueOnce();
-        wifiReconnectLocked = true;
-        lastWiFiRetry = millis();
-        lcd.clear();
-        lcd.setCursor(0,0); lcd.print("WiFi: No Connection");
-        lcd.setCursor(0,1); lcd.print("Alert sent once");
-        lcd.setCursor(0,2); lcd.print("Will retry later...");
-        lcd.setCursor(0,3); lcd.print("Stop searching...");
+        lcd.setCursor(0,2); lcd.print("IP: ");
+        lcd.print(WiFi.localIP());
+        lcd.setCursor(0,3); lcd.print("Ready!");
         smartDelay(2000);
-        wifiConnected = false;
-        return;
+        
+        flashWiFiConnectedIndicator();
+        wifiSuccessBeep();
+        WiFi.scanDelete();
+        return;  // Connection successful - exit immediately
       }
+      wifiWaitingAlertTick();
+      smartDelay(250);
+    }
+    
+    Serial.printf("✗ [VERIFY FAILED %d/3] Could not connect to '%s' within 5 seconds\n", netIndex + 1, networks[netIndex].ssid);
+    
+    // If this isn't the last network, show brief "trying next" message
+    if (netIndex < 2) {
+      lcd.clear();
+      lcd.setCursor(0,0); lcd.print("✗ Failed");
+      lcd.setCursor(0,1); lcd.print("Trying next...");
+      lcd.setCursor(0,2); lcd.print("");
+      lcd.setCursor(0,3); lcd.print("Network ");
+      lcd.print(netIndex + 2);
+      lcd.print("/3");
+      smartDelay(1000);
     }
   }
   
-  Serial.println("Failed to connect to any saved WiFi network");
+  // All networks failed
+  Serial.println("\n✗ [VERIFY FAILED] All 3 networks exhausted - no connection established");
+  WiFi.scanDelete();
   notifyWiFiConnectionIssueOnce();
   wifiReconnectLocked = true;
   lastWiFiRetry = millis();
+  
   lcd.clear();
-  lcd.setCursor(0,0); lcd.print("WiFi: No Connection");
-  lcd.setCursor(0,1); lcd.print("Alert sent once");
-  lcd.setCursor(0,2); lcd.print("Will retry later...");
-  lcd.setCursor(0,3); lcd.print("Stop searching...");
+  lcd.setCursor(0,0); lcd.print("✗ All Networks Failed");
+  lcd.setCursor(0,1); lcd.print("Attempted: 3 networks");
+  lcd.setCursor(0,2); lcd.print("Timeout: 5 sec each");
+  lcd.setCursor(0,3); lcd.print("Retry in 30 sec...");
   smartDelay(2000);
   
-  WiFi.scanDelete();
   wifiConnected = false;
 }
 
@@ -2464,6 +2566,41 @@ void handleWiFiReconnection() {
     Serial.println("WiFi connection lost! Attempting reconnect immediately...");
     wifiDisconnectBeep();
     connectToWiFi();
+  }
+}
+
+void autoVerifyWiFiAvailability() {
+  unsigned long now = millis();
+  
+  // Only perform availability check at regular intervals
+  if (now - lastWiFiAvailabilityCheck < WIFI_AVAILABILITY_CHECK_INTERVAL) {
+    return;
+  }
+  lastWiFiAvailabilityCheck = now;
+  
+  // If already connected, no need to scan
+  if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+  
+  // If disconnected and not locked, start reconnection attempt
+  if (!wifiConnected && !wifiReconnectLocked) {
+    Serial.println("[AUTO-VERIFY] WiFi disconnected - initiating auto-reconnect...");
+    connectToWiFi();
+    return;
+  }
+  
+  // If disconnected and locked (in backoff), do a quick scan to verify networks are available
+  if (!wifiConnected && wifiReconnectLocked) {
+    Serial.println("[AUTO-VERIFY] Scanning for available WiFi networks...");
+    int n = WiFi.scanNetworks();
+    WiFi.scanDelete();
+    
+    if (n > 0) {
+      Serial.printf("[AUTO-VERIFY] Found %d network(s) - will retry when backoff expires\n", n);
+    } else {
+      Serial.println("[AUTO-VERIFY] No networks found - continuing to wait");
+    }
   }
 }
 
@@ -2528,6 +2665,7 @@ void sendSMS(const char* number, String message) {
   smartDelay(7000);
   
   Serial.println("SMS sent!");
+  smsSentBeep();  // Beep pattern: 3 beeps for SMS sent
 }
 
 void makeCall(const char* number, int durationMs) {
@@ -2649,7 +2787,7 @@ void handleIncomingCall() {
     lcd.setCursor(0,2); lcd.print("Answering...");
     lcd.setCursor(0,3); lcd.print("Buzzer Active");
 
-    incomingCallBeep();
+    incomingCallAlertBeep();  // 3 beeps for incoming call
     
     smartDelay(1500);
     answerIncomingCall();
@@ -2788,7 +2926,47 @@ void handleAlertSystem() {
   static unsigned long lastCheckTime = 0;
   unsigned long currentTime = millis();
   
+  // --- SENSOR FAILURE ESCALATION ---
+  // If any sensor is not reading, immediately alert PHONE_1 (call + SMS)
+  // then after ALERT_SMS_PRIMARY_DELAY send SMS to PHONE_2.
+  if (hasSensorError()) {
+    if (!sensorFailureAlertActive) {
+      sensorFailureAlertActive = true;
+      sensorFailureAlertStart = currentTime;
+      sensorFailureLastAction = currentTime;
+      sensorFailureAlertStage = 1;
+      Serial.println("[SENSOR ALERT] Sensor failure detected - notifying primary now");
+      String sMsg = "ALERT: Sensor failure detected on farm system.\nPlease check sensors and wiring.";
+      sendSMS(PHONE_1, sMsg);
+      if (gsmInitialized) {
+        makeCall(PHONE_1, ALERT_CALL_DURATION);
+      } else {
+        Serial.println("[SENSOR ALERT] GSM not initialized - cannot place call");
+      }
+    } else {
+      // stage progression: after primary delay send secondary SMS
+      if (sensorFailureAlertStage == 1 && (currentTime - sensorFailureLastAction >= ALERT_SMS_PRIMARY_DELAY)) {
+        Serial.println("[SENSOR ALERT] Sending secondary SMS to PHONE_2");
+        String sMsg2 = "ALERT: Sensor failure persists. Please check farm sensors immediately.";
+        sendSMS(PHONE_2, sMsg2);
+        sensorFailureAlertStage = 2;
+        sensorFailureLastAction = currentTime;
+      }
+    }
+    // Do not proceed with other alert logic while sensor failure is active
+    return;
+  } else {
+    // sensors ok -> clear sensor failure state so future failures will re-alert
+    if (sensorFailureAlertActive) {
+      Serial.println("[SENSOR ALERT] Sensor readings restored - clearing alert state");
+      sensorFailureAlertActive = false;
+      sensorFailureAlertStage = 0;
+      sensorFailureLastAction = 0;
+    }
+  }
+
   if (isCallActive) return;
+  if (isInManualStartSettling()) return;
   if (!hasActiveIssue) return;
   if (currentTime - lastCheckTime < 1000) return;
   lastCheckTime = currentTime;
@@ -3171,53 +3349,62 @@ void readDayNightLDR() {
 }
 
 void readStartButton() {
-  // Fast-path: serviced from ISR to improve responsiveness even during blocking delays
+  // Require a 1-second confirmed press to toggle START/STOP.
+  // ISR only signals a press event; main loop performs hold-confirmation to avoid accidental toggles.
+  static const unsigned long BUTTON_HOLD_MS = 1000; // 1 second hold to confirm
+  static const unsigned long DEBOUNCE_MS = 50;
   static unsigned long lastButtonHandled = 0;
   static int lastButtonReading = HIGH;
   static int stableButtonState = HIGH;
   static unsigned long lastDebounceTime = 0;
-  static bool buttonWasPressed = false;
+  static unsigned long pressStartTime = 0;
+  static bool pressConfirmed = false;
 
-  if (startStopButtonPressedISR) {
-    startStopButtonPressedISR = false;
-    unsigned long now = millis();
-    if (now - lastButtonHandled > 1000 && !buttonWasPressed) { // 1 second window for button press handling
-      buttonWasPressed = true;
-      userInitiatedBloodingChange = true;
-      setBloodingState(!bloodingEnabled);
-      lastButtonHandled = now;
-      Serial.printf("[BUTTON-ISR] START/STOP toggled -> %s\n", bloodingEnabled ? "START" : "STOP");
-
-      if (wifiConnected && isReadyToPostSensorData()) {
-        Serial.println("[BUTTON] Sending immediate database update after button press...");
-        Serial.print("[BUTTON-DEBUG] x-device-serial: "); Serial.println(DEVICE_SERIAL);
-        Serial.print("[BUTTON-DEBUG] x-api-key (masked): "); Serial.println(maskApiKey(API_KEY));
-        verboseSendNext = true;
-        sendSensorDataToDatabase();
-      } else if (!wifiConnected) {
-        Serial.println("[BUTTON] WiFi not connected - database update will be sent on next cycle");
-      }
-    }
-    controllerDetected = bloodingEnabled;
-    return;
-  }
-
+  // Read raw GPIO
   int rawState = digitalRead(PIN_BUTTON_START_STOP);
   bool pressed = (rawState == LOW);
 
+  // If ISR flagged, use it to bump debounce timer
+  if (startStopButtonPressedISR) {
+    startStopButtonPressedISR = false;
+    lastDebounceTime = millis();
+    lastButtonReading = rawState;
+  }
+
+  // Debounce logic
   if (rawState != lastButtonReading) {
     lastDebounceTime = millis();
     lastButtonReading = rawState;
   }
 
-  if (millis() - lastDebounceTime > 50) {
+  if (millis() - lastDebounceTime > DEBOUNCE_MS) {
     if (rawState != stableButtonState) {
+      // Button edge detected
       stableButtonState = rawState;
-      if (stableButtonState == LOW && !buttonWasPressed) {
-        buttonWasPressed = true;
+      if (stableButtonState == LOW) {
+        // Button pressed - start hold timer
+        pressStartTime = millis();
+        pressConfirmed = false;
+        if (debugMode) Serial.println("[BUTTON] Press detected - starting hold timer");
+      } else {
+        // Button released - reset hold
+        pressStartTime = 0;
+        pressConfirmed = false;
+        if (debugMode) Serial.println("[BUTTON] Released before confirm - ignoring");
+      }
+    }
+  }
+
+  // If pressed long enough, confirm and toggle
+  if (stableButtonState == LOW && pressStartTime > 0 && !pressConfirmed) {
+    if (millis() - pressStartTime >= BUTTON_HOLD_MS) {
+      // enforce a small guard to prevent very rapid re-toggle
+      if (millis() - lastButtonHandled > 500) {
+        pressConfirmed = true;
         userInitiatedBloodingChange = true;
         setBloodingState(!bloodingEnabled);
-        Serial.printf("[BUTTON] START/STOP toggled -> %s\n", bloodingEnabled ? "START" : "STOP");
+        lastButtonHandled = millis();
+        Serial.printf("[BUTTON] Hold-confirm toggled -> %s\n", bloodingEnabled ? "START" : "STOP");
 
         if (wifiConnected && isReadyToPostSensorData()) {
           Serial.println("[BUTTON] Sending immediate database update after button press...");
@@ -3227,9 +3414,9 @@ void readStartButton() {
           sendSensorDataToDatabase();
         } else if (!wifiConnected) {
           Serial.println("[BUTTON] WiFi not connected - database update will be sent on next cycle");
+        } else {
+          Serial.println("[BUTTON] Device not ready to post data - update will be sent when provisioning is complete");
         }
-      } else if (stableButtonState == HIGH) {
-        buttonWasPressed = false;
       }
     }
   }
@@ -3311,6 +3498,11 @@ void readDHT22() {
 }
 
 void checkDangerConditions() {
+  if (isInManualStartSettling()) {
+    currentDangerMessage = "SETTLING...";
+    return;
+  }
+
   float temp = (ds18b20Found && temperatureDS18B20 != 0) ? temperatureDS18B20 : temperatureDHT;
   bool anyDanger = false;
   
@@ -3960,6 +4152,12 @@ void loop() {
   // Process button presses as early as possible to avoid delays from other tasks.
   readStartButton();
   
+  // Quick WiFi status check to detect immediate disconnects
+  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+    wifiConnected = false;
+    Serial.println("[EARLY CHECK] WiFi disconnected detected - will reconnect");
+  }
+  
   if (gsm.available()) {
     handleIncomingCall();
   }
@@ -3978,8 +4176,11 @@ void loop() {
       Serial.print("[DEBUG] Current: "); Serial.println(debugMode ? "ON" : "OFF");
     } else if (cmd == "REQUEST SERIAL" || cmd == "REQUEST_SERIAL" || cmd == "FORCE SERIAL") {
       Serial.println("[CMD] Forcing serial request to backend...");
-      String chipId = String((uint32_t)ESP.getEfuseMac(), HEX);
-      Serial.print("Chip ID: "); Serial.println(chipId);
+      uint64_t efuseMac2 = ESP.getEfuseMac();
+      char chipIdBuf2[13];
+      snprintf(chipIdBuf2, sizeof(chipIdBuf2), "%04x%08x",
+               (uint32_t)(efuseMac2 >> 32), (uint32_t)(efuseMac2));
+      Serial.print("Chip ID: "); Serial.println(chipIdBuf2);
       requestDeviceSerialFromBackend();
     } else if (cmd == "SHOW CREDENTIALS" || cmd == "SHOW_CREDS" || cmd == "CREDENTIALS") {
       Serial.println("[CREDENTIALS] Current device provisioning state:");
@@ -4007,6 +4208,12 @@ void loop() {
   }
   
   handleWiFiReconnection();
+
+  // Beep continuously while WiFi is disconnected (2-second intervals)
+  wifiFailureBeepTick();
+
+  // Automatically verify WiFi availability and reconnect if needed
+  autoVerifyWiFiAvailability();
 
   if (!wifiConnected && !wifiReconnectLocked) {
     connectToWiFi();

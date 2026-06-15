@@ -319,6 +319,9 @@ async function resetDeviceSerialSequence() {
         'DELETE FROM device_registrations WHERE device_serial REGEXP ?',
         ['^NT-[0-9]+-TCL$']
       );
+      await conn.query(
+        'DELETE FROM device_serial_sequence WHERE id = 1'
+      );
     }
 
     await conn.commit();
@@ -880,6 +883,27 @@ router.get('/admin/unassigned', authMiddleware, async (req, res) => {
     return res.json({ success: true, devices });
   } catch (error) {
     console.error('Get unassigned devices error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Admin resets NT- serials and clears the backend serial sequence so next serial begins at NT-01-TCL.
+router.post('/admin/reset-serials', authMiddleware, async (req, res) => {
+  try {
+    await ensureDeviceSchema();
+
+    if (!isAdminLike(req.user?.role)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+
+    const result = await resetDeviceSerialSequence();
+    return res.json({
+      success: true,
+      message: 'Device serial sequence reset successfully. Next generated serial will start at NT-01-TCL.',
+      result
+    });
+  } catch (error) {
+    console.error('Reset serials error:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 });
