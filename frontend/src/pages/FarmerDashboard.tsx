@@ -159,6 +159,39 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
   }, [fetchDeviceLastSeen]);
   // ──────────────────────────────────────────────────────────────────────────
 
+  // ── Fetch & refresh brooding state from backend endpoint ────────────────
+  const fetchBroodingState = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('authToken');
+      if (!token) return;
+
+      const targetSerial = (assignedDeviceSerial || user?.deviceSerialNumber || viewedUser?.deviceSerialNumber || '').trim();
+      if (!targetSerial) return; // Can't fetch without a serial
+
+      const res = await fetch(`${API_BASE_URL}/devices/brooding/${encodeURIComponent(targetSerial)}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (res.ok) {
+        const result = await res.json();
+        if (result?.success && result?.brooding) {
+          setData((prev: any) => ({ ...prev, brooding: result.brooding }));
+        }
+      }
+    } catch (err) {
+      // Non-fatal — brooding state will remain as is
+      console.warn('fetchBroodingState failed:', err);
+    }
+  }, [assignedDeviceSerial, user?.deviceSerialNumber, viewedUser?.deviceSerialNumber]);
+
+  // Fetch brooding state on mount and refresh every 15 seconds
+  useEffect(() => {
+    fetchBroodingState();
+    const interval = setInterval(fetchBroodingState, 15_000);
+    return () => clearInterval(interval);
+  }, [fetchBroodingState]);
+  // ────────────────────────────────────────────────────────────────────────
+
   // Sensor subscription
   useEffect(() => {
     if (isLocked) return;
@@ -470,37 +503,6 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
 
                 
 
-                  <div className="mt-5 grid grid-cols-2 gap-3">
-                    <button
-                      className="rounded-xl border border-neon text-neon font-black py-3"
-                      onClick={async () => {
-                        try {
-                          const targetSerial = (assignedDeviceSerial || user?.deviceSerialNumber || viewedUser?.deviceSerialNumber || '').trim();
-                          if (!targetSerial) { alert('No device serial configured'); return; }
-                          if (!confirm('Reset brooding? This will stop brooding and clear start date.')) return;
-                          await apiCall(`/devices/brooding/${encodeURIComponent(targetSerial)}/command`, { method: 'POST', body: JSON.stringify({ command: 'reset' }) });
-                          alert('Reset command sent');
-                        } catch (err) {
-                          console.error('Brooding reset error', err);
-                          alert('Failed to send reset');
-                        }
-                      }}
-                    >
-                      Reset
-                    </button>
-                    <button
-                      className="rounded-xl border bg-neon/10 text-neon font-black py-3"
-                      onClick={() => {
-                        if (!assignedDeviceSerial && !user?.deviceSerialNumber && !viewedUser?.deviceSerialNumber) {
-                          alert('No device serial configured. Please set your device in Profile.');
-                        } else {
-                          alert(`Brooding is currently ${isActive ? 'running' : 'inactive'} (${days} day(s))`);
-                        }
-                      }}
-                    >
-                      Info
-                    </button>
-                  </div>
                 </>
               );
             })()}

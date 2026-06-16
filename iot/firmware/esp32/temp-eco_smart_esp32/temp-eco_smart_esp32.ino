@@ -3969,25 +3969,13 @@ void setup() {
     connectToWiFi();
   }
   if (wifiConnected) {
-  Serial.println("[NTP] Syncing time with NTP server...");
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  
-  struct tm timeinfo;
-  int ntpRetries = 0;
-  while (!getLocalTime(&timeinfo) && ntpRetries < 20) {
-    Serial.print(".");
-    smartDelay(500);
-    ntpRetries++;
+    Serial.println("[RTC] Using DS3231 RTC for time");
+    if (rtcFound) {
+      printRTCTime();
+    } else {
+      Serial.println("[RTC] DS3231 not detected; time not set");
+    }
   }
-  
-  if (getLocalTime(&timeinfo)) {
-    Serial.printf("\n[NTP] Time synced: %04d-%02d-%02d %02d:%02d:%02d\n",
-      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-      timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-  } else {
-    Serial.println("\n[NTP] Time sync failed - TLS may still fail");
-  }
-}
 
   if (wifiConnected && DEVICE_SERIAL != "UNREGISTERED" && DEVICE_SERIAL.length() > 0) {
     smartDelay(1000);
