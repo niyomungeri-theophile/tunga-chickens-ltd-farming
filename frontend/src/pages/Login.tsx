@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { auth } from '../api';
 import { useTranslation } from '../contexts/LanguageContext';
+// Import image directly - this is the best and most reliable approach
+import chickImage from '../../public/assets/chick.png';
 
 const Login: React.FC = () => {
   const { t } = useTranslation();
@@ -34,7 +36,6 @@ const Login: React.FC = () => {
     }
 
     try {
-      // Login using MySQL backend API
       const result = await auth.signInWithEmailAndPassword(normalizedEmail, normalizedPassword);
       if (result.success) {
         console.log("Login successful!");
@@ -78,23 +79,15 @@ const Login: React.FC = () => {
           
           <div className="text-center">
             <div className="mx-auto h-28 w-28 rounded-full bg-emerald-50 dark:bg-emerald-500/10 flex items-center justify-center mb-4 shadow-sm border-4 border-white dark:border-slate-800 overflow-hidden">
-              {/* Try to load poultry avatar from assets; fall back to Circle icon if missing */}
               <img
-                src="/assets/chicken-avatar.svg"
+                src={chickImage}
                 alt="Chicken avatar"
                 className="w-full h-full object-cover"
-                onLoad={() => { /* no-op; successful load will show image */ }}
-                onError={(e: any) => { e.currentTarget.style.display = 'none'; }}
               />
-              {/* Fallback icon -- shown only if image not available. Using CSS to place behind if image exists */}
-              <div className="absolute">
-                <Circle size={40} strokeWidth={1.5} />
-              </div>
             </div>
             <h2 className="text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">Eco-SPC & Farm management system</h2>
             <p className="mt-2 text-slate-500 dark:text-slate-400 text-sm">{t('login_with_account')}</p>
 
-            {/* Small badge under avatar (like image2) */}
             <div className="mt-3 flex items-center justify-center">
               <span className="bg-emerald-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-sm">ADVANCED AI</span>
             </div>

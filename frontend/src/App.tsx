@@ -492,15 +492,15 @@ const AppContent: React.FC = () => {
       {user && !isPublicRole && <Sidebar user={user} userData={userData} isOpen={isSidebarOpen} toggle={() => setIsSidebarOpen(!isSidebarOpen)} />}
       <div className={`${user && !isPublicRole ? 'md:ml-72 pt-20 md:pt-0' : 'pt-20'} transition-all duration-500 min-h-screen relative`}>
         {location.pathname !== '/' && (
-          <div className="fixed top-20 left-6 z-40 md:left-[calc(18rem+1.5rem)]">
-            <button
-              onClick={handleBack}
-              className="inline-flex items-center gap-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 border border-slate-200 dark:border-white/10 shadow-lg px-4 py-2 text-sm font-semibold text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
-            >
-              <ArrowLeft size={16} />
-              {t('back')}
-            </button>
-          </div>
+         <div className="fixed top-20 right-8 z-40 ">
+  <button
+    onClick={handleBack}
+    className="inline-flex items-center gap-2 rounded-2xl bg-white/95 dark:bg-slate-400 hover:cursor-pointer border border-slate-200 dark:border-white/10 shadow-lg px-4 py-2 text-sm font-semibold text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition animate-bounce"
+  >
+    <ArrowLeft size={16} />
+    {t('back')}
+  </button>
+</div>
         )}
         <Routes>
           <Route

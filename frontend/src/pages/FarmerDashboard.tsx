@@ -466,19 +466,26 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
                       className={`grid place-items-center w-32 h-32 rounded-full text-black transition ${broodingActionPending ? 'opacity-70 cursor-not-allowed' : 'hover:scale-[1.02]'} ${(isActive || broodingIntendedCmd === 'start') ? 'bg-[#22ff22] shadow-[0_0_40px_rgba(34,255,34,0.35)]' : 'bg-[#ff3b3b] shadow-[0_0_40px_rgba(255,59,59,0.35)]'}`}
                       disabled={broodingActionPending}
                       onClick={async () => {
+                        const targetSerial = (assignedDeviceSerial || user?.deviceSerialNumber || viewedUser?.deviceSerialNumber || '').trim();
+                        if (!targetSerial) { alert('No device serial configured'); return; }
+                        const cmd = isActive ? 'stop' : 'start';
+                        setBroodingIntendedCmd(cmd);
+                        setBroodingActionPending(true);
+                        setBroodingActionLabel('Changing...');
+
+                        // Optimistic UI update: flip active state immediately
+                        const prevActive = isActive;
+                        setData((prev: any) => ({ ...prev, brooding: { ...(prev.brooding || {}), active: cmd === 'start' } }));
+
                         try {
-                          const targetSerial = (assignedDeviceSerial || user?.deviceSerialNumber || viewedUser?.deviceSerialNumber || '').trim();
-                          if (!targetSerial) { alert('No device serial configured'); return; }
-                          const cmd = isActive ? 'stop' : 'start';
-                          setBroodingIntendedCmd(cmd);
-                          setBroodingActionPending(true);
-                          setBroodingActionLabel('Changing...');
                           await apiCall(`/devices/brooding/${encodeURIComponent(targetSerial)}/command`, { method: 'POST', body: JSON.stringify({ command: cmd }) });
                           setBroodingActionLabel('Yes');
                           alert('Command sent');
                         } catch (err) {
                           console.error('Brooding command error', err);
                           setBroodingActionLabel('Failed');
+                          // revert optimistic change
+                          setData((prev: any) => ({ ...prev, brooding: { ...(prev.brooding || {}), active: prevActive } }));
                           alert('Failed to send command');
                         } finally {
                           setBroodingActionPending(false);
@@ -493,7 +500,6 @@ const FarmerDashboard: React.FC<{ user: any }> = ({ user }) => {
                     </button>
 
                     <div className="text-center">
-                      <p className="text-[11px] font-black uppercase tracking-[0.25em] text-neon-dark">{systemText}</p>
                       <p className="text-xl font-black uppercase tracking-[0.15em] text-neon mt-2">{buttonLabel}</p>
                       {broodingActionLabel ? (
                         <p className="text-sm font-black uppercase tracking-[0.2em] text-neon mt-1">{broodingActionLabel}</p>

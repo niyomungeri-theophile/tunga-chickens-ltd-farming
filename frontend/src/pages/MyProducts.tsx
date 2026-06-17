@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from '../contexts/LanguageContext';
 import { useLocation } from 'react-router-dom';
-import { Edit, Trash2 } from 'lucide-react';
+import { Edit, Trash2, X, ZoomIn } from 'lucide-react';
 import { parseApiResponse } from '../utils/parseApiResponse';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
@@ -19,6 +19,9 @@ const MyProducts: React.FC = () => {
   const [editForm, setEditForm] = useState<any>(null);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [lightboxVideo, setLightboxVideo] = useState<string | null>(null);
+  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
   const location = useLocation();
   const role = (localStorage.getItem('userRole') || '').toLowerCase();
   const params = new URLSearchParams(location.search);
@@ -153,6 +156,25 @@ const MyProducts: React.FC = () => {
     }
   };
 
+  const openLightbox = (mediaUrl: string, isVideo: boolean = false) => {
+    if (isVideo) {
+      setLightboxVideo(mediaUrl);
+      setLightboxImage(null);
+    } else {
+      setLightboxImage(mediaUrl);
+      setLightboxVideo(null);
+    }
+    setIsLightboxOpen(true);
+    document.body.style.overflow = 'hidden';
+  };
+
+  const closeLightbox = () => {
+    setIsLightboxOpen(false);
+    setLightboxImage(null);
+    setLightboxVideo(null);
+    document.body.style.overflow = 'auto';
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 py-10 px-2 flex flex-col items-center">
       <h2 className="text-3xl font-black mb-8 text-white">{isAdmin && !params.get('userId') ? t('all_products') : t('my_products')}</h2>
@@ -164,73 +186,138 @@ const MyProducts: React.FC = () => {
       {errorMessage && <div className="mb-4 rounded bg-red-600/20 px-4 py-2 text-red-300">{errorMessage}</div>}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-8 w-full max-w-6xl">
         {products.length === 0 && <div className="text-slate-400 col-span-full text-center">{t('no_products_registered_yet')}</div>}
-        {products.map((product) => (
-          <div key={product.id || product.product_id} className="relative bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col">
-            <div className="relative">
-              {product.media_type === 'video' ? (
-                <video
-                  className="w-full h-60 object-cover"
-                  controls
-                  src={resolveImageUrl(product.media_url)}
-                />
-              ) : (
-                <img
-                  src={resolveImageUrl(product.image_url || product.media_url) || 'https://via.placeholder.com/600x400?text=No+Image'}
-                  alt={product.product_name || 'Product'}
-                  className="w-full h-60 object-cover"
-                  onError={e => (e.currentTarget.src = 'https://via.placeholder.com/600x400?text=No+Image')}
-                />
-              )}
-              <div className="absolute top-3 right-3 flex gap-2">
-                {(isAdmin || String(product.uploaded_by || '') === String(targetUserId)) && (
-                  <>
-                    <button
-                      type="button"
-                      className="bg-blue-600 hover:bg-blue-700 text-white rounded-full p-2 shadow transition"
-                      title="Edit"
-                      onClick={() => startEdit(product)}
-                    >
-                      <Edit size={18} />
-                    </button>
-                    <button
-                      type="button"
-                      className="bg-red-600 hover:bg-red-700 text-white rounded-full p-2 shadow transition"
-                      title="Delete"
-                      onClick={() => handleDelete(product.id)}
-                    >
-                      <Trash2 size={18} />
-                    </button>
-                  </>
+        {products.map((product) => {
+          const mediaUrl = resolveImageUrl(product.image_url || product.media_url);
+          const isVideo = product.media_type === 'video' || mediaUrl?.match(/\.(mp4|webm|ogg)$/i);
+          
+          return (
+            <div key={product.id || product.product_id} className="relative bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col group">
+              <div className="relative">
+                {isVideo ? (
+                  <div 
+                    className="w-full h-60 bg-slate-800 overflow-hidden cursor-pointer relative group/video"
+                    onClick={() => openLightbox(mediaUrl, true)}
+                  >
+                    <video
+                      className="w-full h-full object-cover"
+                      muted
+                      playsInline
+                      src={mediaUrl}
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/video:opacity-100 transition-opacity flex items-center justify-center">
+                      <ZoomIn className="text-white w-12 h-12" />
+                    </div>
+                    <div className="absolute bottom-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded">
+                      Click to enlarge
+                    </div>
+                  </div>
+                ) : (
+                  <div 
+                    className="w-full h-60 bg-slate-800 flex items-center justify-center overflow-hidden cursor-pointer relative group/image"
+                    onClick={() => openLightbox(mediaUrl)}
+                  >
+                    <img
+                      src={mediaUrl || 'https://via.placeholder.com/600x400?text=No+Image'}
+                      alt={product.product_name || 'Product'}
+                      className="w-full h-full object-cover transition-transform duration-300 group-hover/image:scale-110"
+                      onError={e => (e.currentTarget.src = 'https://via.placeholder.com/600x400?text=No+Image')}
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/image:opacity-100 transition-opacity flex items-center justify-center">
+                      <ZoomIn className="text-white w-12 h-12" />
+                    </div>
+                    <div className="absolute bottom-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded opacity-0 group-hover/image:opacity-100 transition-opacity">
+                      Click to enlarge
+                    </div>
+                  </div>
                 )}
-              </div>
-            </div>
-            {editingId === product.id && editForm ? (
-              <form onSubmit={handleEditSubmit} className="flex flex-col flex-1 gap-2 p-4">
-                <input id="product_name" value={editForm.product_name} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Product name" required />
-                <textarea id="description" value={editForm.description} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Description" required />
-                <input id="price" value={editForm.price} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Price" type="number" min="0" required />
-                <input id="location" value={editForm.location} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Location" required />
-                <input id="address" value={editForm.address} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Address" />
-                <input id="seller_name" value={editForm.seller_name} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Seller name" />
-                <input id="contact" value={editForm.contact} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Contact" />
-                <input id="image" onChange={handleEditImage} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900" type="file" accept="image/*" />
-                <div className="flex gap-2 mt-2">
-                  <button type="submit" className="btn btn-navy flex-1" disabled={saving}>{saving ? t('processing') : t('save')}</button>
-                  <button type="button" className="btn btn-secondary flex-1" onClick={() => { setEditingId(null); setEditForm(null); }}>{t('cancel')}</button>
+                <div className="absolute top-3 right-3 flex gap-2">
+                  {(isAdmin || String(product.uploaded_by || '') === String(targetUserId)) && (
+                    <>
+                      <button
+                        type="button"
+                        className="bg-blue-600 hover:bg-blue-700 text-white rounded-full p-2 shadow transition"
+                        title="Edit"
+                        onClick={() => startEdit(product)}
+                      >
+                        <Edit size={18} />
+                      </button>
+                      <button
+                        type="button"
+                        className="bg-red-600 hover:bg-red-700 text-white rounded-full p-2 shadow transition"
+                        title="Delete"
+                        onClick={() => handleDelete(product.id)}
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </>
+                  )}
                 </div>
-              </form>
-            ) : (
-              <div className="flex flex-col flex-1 p-4">
-                <div className="font-black text-lg text-white mb-1">{product.product_name}</div>
-                {product.description && <div className="text-slate-400 mb-2">{product.description}</div>}
-                <div className="text-xs text-slate-500">Location: {product.location || '-'}</div>
-                {product.address && <div className="text-xs text-slate-500">Address: {product.address}</div>}
-                <div className="font-black text-green-400 mt-2">${product.price}</div>
               </div>
+              {editingId === product.id && editForm ? (
+                <form onSubmit={handleEditSubmit} className="flex flex-col flex-1 gap-2 p-4">
+                  <input id="product_name" value={editForm.product_name} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Product name" required />
+                  <textarea id="description" value={editForm.description} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Description" required />
+                  <input id="price" value={editForm.price} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Price" type="number" min="0" required />
+                  <input id="location" value={editForm.location} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Location" required />
+                  <input id="address" value={editForm.address} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Address" />
+                  <input id="seller_name" value={editForm.seller_name} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Seller name" />
+                  <input id="contact" value={editForm.contact} onChange={handleEditInput} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900 placeholder:text-slate-500" placeholder="Contact" />
+                  <input id="image" onChange={handleEditImage} className="w-full rounded bg-slate-100 px-3 py-2 text-slate-900" type="file" accept="image/*" />
+                  <div className="flex gap-2 mt-2">
+                    <button type="submit" className="btn btn-navy flex-1" disabled={saving}>{saving ? t('processing') : t('save')}</button>
+                    <button type="button" className="btn btn-secondary flex-1" onClick={() => { setEditingId(null); setEditForm(null); }}>{t('cancel')}</button>
+                  </div>
+                </form>
+              ) : (
+                <div className="flex flex-col flex-1 p-4">
+                  <div className="font-black text-lg text-white mb-1">{product.product_name}</div>
+                  {product.description && <div className="text-slate-400 mb-2">{product.description}</div>}
+                  <div className="text-xs text-slate-500">Location: {product.location || '-'}</div>
+                  {product.address && <div className="text-xs text-slate-500">Address: {product.address}</div>}
+                  <div className="font-black text-green-400 mt-2">${product.price}</div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Lightbox Modal */}
+      {isLightboxOpen && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4"
+          onClick={closeLightbox}
+        >
+          <button
+            className="absolute top-4 right-4 text-white hover:text-gray-300 transition-colors z-10"
+            onClick={closeLightbox}
+          >
+            <X size={40} />
+          </button>
+          <div className="relative max-w-6xl max-h-[90vh] w-full h-full flex items-center justify-center">
+            {lightboxImage && (
+              <img
+                src={lightboxImage}
+                alt="Enlarged view"
+                className="max-w-full max-h-full object-contain"
+                onClick={(e) => e.stopPropagation()}
+              />
+            )}
+            {lightboxVideo && (
+              <video
+                className="max-w-full max-h-full object-contain"
+                controls
+                autoPlay
+                src={lightboxVideo}
+                onClick={(e) => e.stopPropagation()}
+              />
             )}
           </div>
-        ))}
-      </div>
+          <div className="absolute bottom-4 text-white/60 text-sm">
+            Click outside to close
+          </div>
+        </div>
+      )}
     </div>
   );
 };
